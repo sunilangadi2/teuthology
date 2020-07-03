@@ -16,14 +16,10 @@ class TestInstall(object):
         )
         pkgs = yaml.safe_load(open(path))[project]
         if not debug:
-            pkgs['deb'] = filter(
-                lambda p: not p.endswith('-dbg'),
-                pkgs['deb']
-            )
-            pkgs['rpm'] = filter(
-                lambda p: not p.endswith('-debuginfo'),
-                pkgs['rpm']
-            )
+            pkgs['deb'] = [p for p in pkgs['deb']
+                                        if not p.endswith('-dbg')]
+            pkgs['rpm'] = [p for p in pkgs['rpm']
+                                        if not p.endswith('-debuginfo')]
         return pkgs
 
     def test_get_package_list_debug(self):
@@ -310,14 +306,14 @@ class TestInstall(object):
         remote = Mock()
         version = '1.3.2'
         rh_ds_yaml = dict()
-        rh_ds_yaml = {'versions': {'deb': {'mapped': {'1.3.2': '0.94.5'}}},
-                      'pkgs': { 'deb': ['pkg1', 'pkg2'] }}
+        rh_ds_yaml = {
+            'versions': {'deb': {'mapped': {'1.3.2': '0.94.5'}}},
+            'pkgs': {'deb': ['pkg1', 'pkg2']},
+            'extra_system_packages': {'deb': ['es_pkg1', 'es_pkg2']},
+            'extra_packages': {'deb': ['e_pkg1', 'e_pkg2']},
+        }
         m_get_pkg_version.return_value = "0.94.5"
-        deb_repo=Mock()
-        deb_gpg_key=Mock()
-        install.redhat.install_deb_pkgs(ctx, remote, version, rh_ds_yaml,
-                                    deb_repo, deb_gpg_key)
-
+        install.redhat.install_deb_pkgs(ctx, remote, version, rh_ds_yaml)
 
     @patch("teuthology.task.install.packaging.get_package_version")
     def test_rh_install_pkgs(self, m_get_pkg_version):
@@ -325,9 +321,14 @@ class TestInstall(object):
         remote = Mock()
         version = '1.3.2'
         rh_ds_yaml = dict()
-        rh_ds_yaml = {'versions': {'rpm': {'mapped': {'1.3.2': '0.94.5',
-                                                      '1.3.1': '0.94.3'}}},
-                      'pkgs': { 'rpm': ['pkg1', 'pkg2'] }}
+        rh_ds_yaml = {
+            'versions': {'rpm': {'mapped': {'1.3.2': '0.94.5',
+                                            '1.3.1': '0.94.3'}}},
+            'pkgs': {'rpm': ['pkg1', 'pkg2']},
+            'extra_system_packages': {'rpm': ['es_pkg1', 'es_pkg2']},
+            'extra_packages': {'rpm': ['e_pkg1', 'e_pkg2']},
+        }
+
         m_get_pkg_version.return_value = "0.94.5"
         install.redhat.install_pkgs(ctx, remote, version, rh_ds_yaml)
         version = '1.3.1'

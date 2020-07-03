@@ -2,7 +2,6 @@
 Miscellaneous teuthology functions.
 Used by other modules, but mostly called from tasks.
 """
-
 import argparse
 import os
 import logging
@@ -10,15 +9,14 @@ import configobj
 import getpass
 import socket
 import subprocess
-import sys
 import tarfile
 import time
-import urllib2
-import urlparse
 import yaml
 import json
 import re
 import pprint
+
+from teuthology.util.compat import urljoin, urlopen, HTTPError
 
 from netaddr.strategy.ipv4 import valid_str as _is_ipv4
 from netaddr.strategy.ipv6 import valid_str as _is_ipv6
@@ -29,6 +27,7 @@ from teuthology.orchestra import run
 from teuthology.config import config
 from teuthology.contextutil import safe_while
 from teuthology.orchestra.opsys import DEFAULT_OS_VERSION
+
 
 log = logging.getLogger(__name__)
 
@@ -230,19 +229,19 @@ def get_ceph_binary_url(package=None,
                 branch = 'master'
             ref = branch
 
-        sha1_url = urlparse.urljoin(BASE, 'ref/{ref}/sha1'.format(ref=ref))
+        sha1_url = urljoin(BASE, 'ref/{ref}/sha1'.format(ref=ref))
         log.debug('Translating ref to sha1 using url %s', sha1_url)
 
         try:
-            sha1_fp = urllib2.urlopen(sha1_url)
+            sha1_fp = urlopen(sha1_url)
             sha1 = sha1_fp.read().rstrip('\n')
             sha1_fp.close()
-        except urllib2.HTTPError as e:
+        except HTTPError as e:
             log.error('Failed to get url %s', sha1_url)
             raise e
 
     log.debug('Using %s %s sha1 %s', package, format, sha1)
-    bindir_url = urlparse.urljoin(BASE, 'sha1/{sha1}/'.format(sha1=sha1))
+    bindir_url = urljoin(BASE, 'sha1/{sha1}/'.format(sha1=sha1))
     return (sha1, bindir_url)
 
 
@@ -646,7 +645,7 @@ def remove_lines_from_file(remote, path, line_is_valid_test,
     on when the main site goes up and down.
     """
     # read in the specified file
-    in_data = get_file(remote, path, False)
+    in_data = get_file(remote, path, False).decode()
     out_data = ""
 
     first_line = True
@@ -684,7 +683,7 @@ def append_lines_to_file(remote, path, lines, sudo=False):
 
     temp_file_path = remote.mktemp()
 
-    data = get_file(remote, path, sudo)
+    data = get_file(remote, path, sudo).decode()
 
     # add the additional data and write it back out, using a temp file
     # in case of connectivity of loss, and then mv it to the
@@ -704,7 +703,7 @@ def prepend_lines_to_file(remote, path, lines, sudo=False):
 
     temp_file_path = remote.mktemp()
 
-    data = get_file(remote, path, sudo)
+    data = get_file(remote, path, sudo).decode()
 
     # add the additional data and write it back out, using a temp file
     # in case of connectivity of loss, and then mv it to the
@@ -748,7 +747,7 @@ def get_file(remote, path, sudo=False, dest_dir='/tmp'):
     Remote.get_file() instead.
     """
     local_path = remote.get_file(path, sudo=sudo, dest_dir=dest_dir)
-    with open(local_path) as file_obj:
+    with open(local_path, 'rb') as file_obj:
         file_data = file_obj.read()
     os.remove(local_path)
     return file_data
@@ -809,7 +808,7 @@ def get_scratch_devices(remote):
     """
     devs = []
     try:
-        file_data = get_file(remote, "/scratch_devs")
+        file_data = get_file(remote, "/scratch_devs").decode()
         devs = file_data.split()
     except Exception:
         devs = remote.sh('ls /dev/[sv]d?').strip().split('\n')
@@ -862,7 +861,7 @@ def wait_until_healthy(ctx, remote, ceph_cluster='ceph', use_sudo=False):
             'ceph-coverage',
             '{tdir}/archive/coverage'.format(tdir=testdir)]
     args.extend(cmd)
-    with safe_while(tries=(900 / 6), action="wait_until_healthy") as proceed:
+    with safe_while(tries=(900 // 6), action="wait_until_healthy") as proceed:
         while proceed():
             out = remote.sh(args, logger=log.getChild('health'))
             log.debug('Ceph health: %s', out.rstrip('\n'))
@@ -892,7 +891,7 @@ def wait_until_osds_up(ctx, cluster, remote, ceph_cluster='ceph'):
                 logger=log.getChild('health'),
             )
             j = json.loads('\n'.join(out.split('\n')[1:]))
-            up = len(filter(lambda o: 'up' in o['state'], j['osds']))
+            up = sum(1 for o in j['osds'] if 'up' in o['state'])
             log.debug('%d of %d OSDs are up' % (up, num_osds))
             if up == num_osds:
                 break
@@ -943,7 +942,7 @@ def reconnect(ctx, timeout, remotes=None):
     if remotes:
         need_reconnect = remotes
     else:
-        need_reconnect = ctx.cluster.remotes.keys()
+        need_reconnect = list(ctx.cluster.remotes.keys())
 
     while need_reconnect:
         for remote in need_reconnect:
@@ -966,7 +965,7 @@ def get_clients(ctx, roles):
     return all remote roles that are clients.
     """
     for role in roles:
-        assert isinstance(role, basestring)
+        assert isinstance(role, str)
         assert 'client.' in role
         _, _, id_ = split_role(role)
         (remote,) = ctx.cluster.only(role).remotes.keys()
@@ -1056,7 +1055,13 @@ def get_valgrind_args(testdir, name, preamble, v):
         return preamble
     if not isinstance(v, list):
         v = [v]
-    val_path = '/var/log/ceph/valgrind'.format(tdir=testdir)
+
+    # https://tracker.ceph.com/issues/44362
+    preamble.extend([
+        'env', 'OPENSSL_ia32cap=~0x1000000000000000',
+    ])
+
+    val_path = '/var/log/ceph/valgrind'
     if '--tool=memcheck' in v or '--tool=helgrind' in v:
         extra_args = [
             'valgrind',
@@ -1067,6 +1072,10 @@ def get_valgrind_args(testdir, name, preamble, v):
             '--xml=yes',
             '--xml-file={vdir}/{n}.log'.format(vdir=val_path, n=name),
             '--time-stamp=yes',
+            '--vgdb=yes',
+            # at least Valgrind 3.14 is required
+            '--exit-on-first-error=yes',
+            '--error-exitcode=42',
         ]
     else:
         extra_args = [
@@ -1076,6 +1085,9 @@ def get_valgrind_args(testdir, name, preamble, v):
             '--suppressions={tdir}/valgrind.supp'.format(tdir=testdir),
             '--log-file={vdir}/{n}.log'.format(vdir=val_path, n=name),
             '--time-stamp=yes',
+            '--vgdb=yes',
+            '--exit-on-first-error=yes',
+            '--error-exitcode=42',
         ]
     args = [
         'cd', testdir,
@@ -1093,7 +1105,7 @@ def ssh_keyscan(hostnames, _raise=True):
     :param _raise: Whether to raise an exception if not all keys are retrieved
     :returns: A dict keyed by hostname, with the host keys as values
     """
-    if isinstance(hostnames, basestring):
+    if not isinstance(hostnames, list) and not isinstance(hostnames, dict):
         raise TypeError("'hostnames' must be a list")
     hostnames = [canonicalize_hostname(name, user=None) for name in
                  hostnames]
@@ -1134,12 +1146,13 @@ def _ssh_keyscan(hostname):
         stderr=subprocess.PIPE,
     )
     p.wait()
-    for line in p.stderr.readlines():
+    for line in p.stderr:
+        line = line.decode()
         line = line.strip()
         if line and not line.startswith('#'):
             log.error(line)
-    for line in p.stdout.readlines():
-        host, key = line.strip().split(' ', 1)
+    for line in p.stdout:
+        host, key = line.strip().decode().split(' ', 1)
         return key
 
 
@@ -1165,17 +1178,17 @@ def stop_daemons_of_type(ctx, type_, cluster='ceph'):
     :param type_: type of daemons to be stopped.
     """
     log.info('Shutting down %s daemons...' % type_)
-    exc_info = (None, None, None)
+    exc = None
     for daemon in ctx.daemons.iter_daemons_of_role(type_, cluster):
         try:
             daemon.stop()
         except (CommandFailedError,
                 CommandCrashedError,
-                ConnectionLostError):
-            exc_info = sys.exc_info()
+                ConnectionLostError) as e:
+            exc = e
             log.exception('Saw exception from %s.%s', daemon.role, daemon.id_)
-    if exc_info != (None, None, None):
-        raise exc_info[0], exc_info[1], exc_info[2]
+    if exc is not None:
+        raise exc
 
 
 def get_system_type(remote, distro=False, version=False):
@@ -1199,6 +1212,7 @@ def get_system_type(remote, distro=False, version=False):
     if system_value in ['Ubuntu', 'Debian']:
         return "deb"
     if system_value in ['CentOS', 'Fedora', 'RedHatEnterpriseServer',
+                        'RedHatEnterprise',
                         'openSUSE', 'openSUSE project', 'SUSE', 'SUSE LINUX']:
         return "rpm"
     return system_value
@@ -1289,7 +1303,7 @@ def is_in_dict(searchkey, searchval, d):
         return searchval == val
 
 
-def sh(command, log_limit=1024):
+def sh(command, log_limit=1024, cwd=None, env=None):
     """
     Run the shell command and return the output in ascii (stderr and
     stdout).  If the command fails, raise an exception. The command
@@ -1298,6 +1312,8 @@ def sh(command, log_limit=1024):
     log.debug(":sh: " + command)
     proc = subprocess.Popen(
         args=command,
+        cwd=cwd,
+        env=env,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         shell=True,
@@ -1305,16 +1321,17 @@ def sh(command, log_limit=1024):
     lines = []
     truncated = False
     with proc.stdout:
-        for line in iter(proc.stdout.readline, b''):
+        for line in proc.stdout:
+            line = line.decode()
             lines.append(line)
             line = line.strip()
             if len(line) > log_limit:
                 truncated = True
-                log.debug(str(line)[:log_limit] +
+                log.debug(line[:log_limit] +
                           "... (truncated to the first " + str(log_limit) +
                           " characters)")
             else:
-                log.debug(str(line))
+                log.debug(line)
     output = "".join(lines)
     if proc.wait() != 0:
         if truncated:
@@ -1327,4 +1344,4 @@ def sh(command, log_limit=1024):
             cmd=command,
             output=output
         )
-    return output.decode('utf-8')
+    return output

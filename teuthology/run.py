@@ -1,7 +1,5 @@
 import os
 import yaml
-import StringIO
-import contextlib
 import sys
 import logging
 
@@ -169,10 +167,16 @@ def validate_tasks(config):
 
 def get_initial_tasks(lock, config, machine_type):
     init_tasks = []
-    overrides = config.get('overrides')
-    having_repos = ('install' in config and 'repos' in config.get('install')) \
-        or (overrides and 'install' in overrides and 'repos' in overrides.get('install'))
-    if not having_repos:
+    overrides = config.get('overrides', {})
+    having_repos = ('repos' in config.get('install', {}) or
+                    'repos' in overrides.get('install', {}))
+    if 'redhat' in config:
+        pass
+    elif having_repos:
+        pass
+    elif not config.get('verify_ceph_hash', True):
+        pass
+    else:
         init_tasks += [
             {'internal.check_packages': None},
             {'internal.buildpackages_prep': None},
@@ -207,7 +211,8 @@ def get_initial_tasks(lock, config, machine_type):
             {'internal.vm_setup': None},
         ])
 
-    if 'kernel' in config:
+    # install_latest_rh_kernel is used for redhat config
+    if 'redhat' not in config and 'kernel' in config:
         init_tasks.append({'kernel': config['kernel']})
 
     if 'roles' in config:
@@ -227,6 +232,11 @@ def get_initial_tasks(lock, config, machine_type):
             {'pcp': None},
             {'selinux': None},
         ])
+
+    if 'redhat' in config:
+        init_tasks.extend([
+            {'internal.setup_stage_cdn': None}])
+
     if config.get('ceph_cm_ansible', True):
         init_tasks.append({'ansible.cephlab': None})
 
@@ -236,6 +246,7 @@ def get_initial_tasks(lock, config, machine_type):
 
     if 'redhat' in config:
         init_tasks.extend([
+            {'internal.git_ignore_ssl': None},
             {'internal.setup_cdn_repo': None},
             {'internal.setup_base_repo': None},
             {'internal.setup_additional_repo': None},
@@ -258,20 +269,16 @@ def report_outcome(config, archive, summary, fake_ctx):
         with open(os.path.join(archive, 'summary.yaml'), 'w') as f:
             yaml.safe_dump(summary, f, default_flow_style=False)
 
-    with contextlib.closing(StringIO.StringIO()) as f:
-        yaml.safe_dump(summary, f)
-        log.info('Summary data:\n%s' % f.getvalue())
+    summary_dump = yaml.safe_dump(summary)
+    log.info('Summary data:\n%s' % summary_dump)
 
-    with contextlib.closing(StringIO.StringIO()) as f:
-        if ('email-on-error' in config
-                and not passed):
-            yaml.safe_dump(summary, f)
-            yaml.safe_dump(config, f)
-            emsg = f.getvalue()
-            subject = "Teuthology error -- %s" % summary[
-                'failure_reason']
-            email_results(subject, "Teuthology", config[
-                          'email-on-error'], emsg)
+    if ('email-on-error' in config
+            and not passed):
+        config_dump = yaml.safe_dump(config)
+        subject = "Teuthology error -- %s" % summary['failure_reason']
+        email_results(subject, "Teuthology", config['email-on-error'],
+            "\n".join([summary_dump, config_dump]))
+
 
     report.try_push_job_info(config, summary)
 

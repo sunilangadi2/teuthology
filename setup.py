@@ -10,8 +10,8 @@ setup(
     version=metadata['version'],
     packages=find_packages(),
     package_data={
-     'teuthology.task': ['valgrind.supp', 'adjust-ulimits', 'edit_sudoers.sh', 'daemon-helper'],
-     'teuthology.task': ['valgrind.supp', 'adjust-ulimits', 'edit_sudoers.sh', 'daemon-helper'],
+     'teuthology.task': ['adjust-ulimits', 'edit_sudoers.sh', 'daemon-helper'],
+     'teuthology.task': ['adjust-ulimits', 'edit_sudoers.sh', 'daemon-helper'],
      'teuthology.openstack': [
          'archive-key',
          'archive-key.pub',
@@ -42,58 +42,68 @@ setup(
         'License :: OSI Approved :: MIT License',
         'Natural Language :: English',
         'Operating System :: POSIX :: Linux',
-        'Programming Language :: Python :: 2.7',
+        'Programming Language :: Python :: 3.6',
         'Topic :: Software Development :: Quality Assurance',
         'Topic :: Software Development :: Testing',
         'Topic :: System :: Distributed Computing',
         'Topic :: System :: Filesystems',
     ],
-    install_requires=['pip-tools',
-                      'tox',
+    install_requires=['apache-libcloud',
                       'gevent',
                       'PyYAML',
                       'argparse >= 1.2.1',
-                      'beanstalkc3 >= 0.4.0',
-                      'boto >= 2.0b4',
-                      'bunch >= 1.0.0',
                       'configobj',
                       'six >= 1.9', # python-openstackclient won't work properly with less
-                      'httplib2',
-                      'paramiko',
                       'pexpect',
-                      'pytest', # for tox.ini
-                      'nose', # for qa/tasks/rgw_multisite_tests.py',
-                      'requests != 2.13.0',
-                      'raven',
-                      'web.py',
                       'docopt',
+                      'netaddr',  # teuthology/misc.py
+                      # only used by orchestra, but we monkey-patch it in
+                      # teuthology/__init__.py
+                      'paramiko',
                       'psutil >= 2.1.0',
                       'configparser',
                       'ansible>=2.0',
-                      'pyopenssl>=0.13',
-                      'ndg-httpsclient',
-                      'pyasn1',
-                      # python-novaclient is specified here, even though it is
-                      # redundant, because python-openstackclient requires
-                      # Babel, and installs 2.3.3, which is forbidden by
-                      # python-novaclient 4.0.0
-                      'python-novaclient',
-                      'python-openstackclient',
-                      # with openstacklient >= 2.1.0, neutronclient no longer is
-                      # a dependency but we need it anyway.
-                      'python-neutronclient',
                       'prettytable',
-                      'python-dateutil',
                       'manhole',
-                      'apache-libcloud',
-                      # For apache-libcloud when using python < 2.7.9
-                      'backports.ssl_match_hostname',
-                      # For bucket notification testing in multisite
-                      'xmltodict',
-                      'boto3',
+                      'humanfriendly',
                       ],
     extras_require = {
-        'coverage': [ 'mysqlclient == 1.4.2'],
+        'orchestra': [
+            # For apache-libcloud when using python < 2.7.9
+            'backports.ssl_match_hostname',
+            'beanstalkc3 >= 0.4.0',
+            'httplib2',
+            'ndg-httpsclient',  # for requests, urllib3
+            'pyasn1',           # for requests, urllib3
+            'pyopenssl>=0.13',  # for requests, urllib3
+            'python-dateutil',
+            # python-novaclient is specified here, even though it is
+            # redundant, because python-openstackclient requires
+            # Babel, and installs 2.3.3, which is forbidden by
+            # python-novaclient 4.0.0
+            'python-novaclient',
+            'python-openstackclient',
+            # with openstacklient >= 2.1.0, neutronclient no longer is
+            # a dependency but we need it anyway.
+            'python-neutronclient',
+            'raven',
+            'requests != 2.13.0',
+        ],
+        'test': [
+            'boto >= 2.0b4',       # for qa/tasks/radosgw_*.py
+            'cryptography >= 2.7',  # for qa/tasks/mgr/dashboard/test_rgw.py
+            'nose', # for qa/tasks/rgw_multisite_tests.py',
+            'pip-tools',
+            'pytest',           # for tox.ini
+            'requests',         # for qa/tasks/mgr/dashboard/helper.py
+            'tox',
+            # For bucket notification testing in multisite
+            'xmltodict',
+            'boto3',
+            'PyJWT',            # for qa/tasks/mgr/dashboard/test_auth.py
+            'ipy',              # for qa/tasks/cephfs/mount.py
+            'toml',             # for qa/tasks/cephadm.py
+        ]
     },
 
 
@@ -112,13 +122,13 @@ setup(
             'teuthology-schedule = scripts.schedule:main',
             'teuthology-updatekeys = scripts.updatekeys:main',
             'teuthology-update-inventory = scripts.update_inventory:main',
-            'teuthology-coverage = scripts.coverage:main',
             'teuthology-results = scripts.results:main',
             'teuthology-report = scripts.report:main',
             'teuthology-kill = scripts.kill:main',
             'teuthology-queue = scripts.queue:main',
             'teuthology-prune-logs = scripts.prune_logs:main',
-            'teuthology-describe-tests = scripts.describe_tests:main',
+            'teuthology-describe = scripts.describe:main',
+            'teuthology-reimage = scripts.reimage:main'
             ],
         },
 

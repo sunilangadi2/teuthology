@@ -15,7 +15,12 @@ def get_key_parser():
     )
     parser.add_argument(
         '--key-filename',
-        help='path to the ssh private key',
+        help='path to the ssh private key. Default: %(default)s',
+        default=[
+            os.environ['HOME'] + '/.ssh/id_rsa',
+            os.environ['HOME'] + '/.ssh/id_dsa',
+            os.environ['HOME'] + '/.ssh/id_ecdsa'
+        ]
     )
     return parser
 
@@ -181,6 +186,11 @@ def get_suite_parser():
         '--suite-repo',
         help=("Use tasks and suite definition in this repository"),
         default=os.getenv('TEUTH_SUITE_REPO', 'https://github.com/ceph/ceph'),
+    )
+    parser.add_argument(
+        '--sleep-before-teardown',
+        help='Number of seconds to sleep before the teardown',
+        default=0
     )
     return parser
 

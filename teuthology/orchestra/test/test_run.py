@@ -1,4 +1,4 @@
-from StringIO import StringIO
+from io import BytesIO
 
 import paramiko
 import socket
@@ -10,16 +10,17 @@ from teuthology.orchestra import run
 from teuthology.exceptions import (CommandCrashedError, CommandFailedError,
                                    ConnectionLostError)
 
-
 def set_buffer_contents(buf, contents):
     buf.seek(0)
-    if isinstance(contents, basestring):
+    if isinstance(contents, bytes):
         buf.write(contents)
     elif isinstance(contents, (list, tuple)):
         buf.writelines(contents)
+    elif isinstance(contents, str):
+        buf.write(contents.encode())
     else:
         raise TypeError(
-            "% is is a %s; should be a string, list or tuple" % (
+            "%s is a %s; should be a byte string, list or tuple" % (
                 contents, type(contents)
             )
         )
@@ -46,7 +47,7 @@ class TestRun(object):
         self.m_stdout_buf = self.m_channelfile(self.m_channel())
         self.m_stderr_buf = self.m_channelfile(self.m_channel())
         """
-        class M_ChannelFile(StringIO):
+        class M_ChannelFile(BytesIO):
             channel = MagicMock(spec=paramiko.Channel)()
 
         self.m_channelfile = M_ChannelFile
@@ -99,29 +100,29 @@ class TestRun(object):
         output = 'foo\nbar'
         set_buffer_contents(self.m_stdout_buf, output)
         self.m_stdout_buf.channel.recv_exit_status.return_value = 0
-        stdout = StringIO()
+        stdout = BytesIO()
         proc = run.run(
             client=self.m_ssh,
             args=['foo', 'bar baz'],
             stdout=stdout,
         )
         assert proc.stdout is stdout
-        assert proc.stdout.read() == output
-        assert proc.stdout.getvalue() == output
+        assert proc.stdout.read().decode() == output
+        assert proc.stdout.getvalue().decode() == output
 
     def test_capture_stderr_newline(self):
         output = 'foo\nbar\n'
         set_buffer_contents(self.m_stderr_buf, output)
         self.m_stderr_buf.channel.recv_exit_status.return_value = 0
-        stderr = StringIO()
+        stderr = BytesIO()
         proc = run.run(
             client=self.m_ssh,
             args=['foo', 'bar baz'],
             stderr=stderr,
         )
         assert proc.stderr is stderr
-        assert proc.stderr.read() == output
-        assert proc.stderr.getvalue() == output
+        assert proc.stderr.read().decode() == output
+        assert proc.stderr.getvalue().decode() == output
 
     def test_status_bad(self):
         self.m_stdout_buf.channel.recv_exit_status.return_value = 42
@@ -223,7 +224,7 @@ class TestRun(object):
 
     def test_stdout_pipe(self):
         self.m_stdout_buf.channel.recv_exit_status.return_value = 0
-        lines = ['one\n', 'two', '']
+        lines = [b'one\n', b'two', b'']
         set_buffer_contents(self.m_stdout_buf, lines)
         proc = run.run(
             client=self.m_ssh,
@@ -241,7 +242,7 @@ class TestRun(object):
 
     def test_stderr_pipe(self):
         self.m_stdout_buf.channel.recv_exit_status.return_value = 0
-        lines = ['one\n', 'two', '']
+        lines = [b'one\n', b'two', b'']
         set_buffer_contents(self.m_stderr_buf, lines)
         proc = run.run(
             client=self.m_ssh,
@@ -256,6 +257,11 @@ class TestRun(object):
         code = proc.wait()
         assert code == 0
         assert proc.exitstatus == 0
+
+    def test_copy_and_close(self):
+        run.copy_and_close(None, MagicMock())
+        run.copy_and_close('', MagicMock())
+        run.copy_and_close(b'', MagicMock())
 
 
 class TestQuote(object):

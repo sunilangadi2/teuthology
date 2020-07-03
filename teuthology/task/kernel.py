@@ -1,13 +1,14 @@
 """
 Kernel installation task
 """
-from cStringIO import StringIO
 
 import logging
 import os
 import re
 import shlex
-import urlparse
+from io import StringIO
+
+from teuthology.util.compat import urljoin
 
 from teuthology import misc as teuthology
 from teuthology.parallel import parallel
@@ -76,8 +77,8 @@ def normalize_config(ctx, config):
     :param config: Configuration
     """
     if not config or \
-            len(filter(lambda x: x in VERSION_KEYS + ['kdb', 'flavor'],
-                       config.keys())) == len(config.keys()):
+            len([x for x in config.keys() if x in
+                VERSION_KEYS + ['kdb', 'flavor']]) == len(config.keys()):
         new_config = {}
         if not config:
             config = CONFIG_DEFAULT
@@ -183,7 +184,8 @@ def need_to_install(ctx, role, version):
         stdout=uname_fp,
         )
     cur_version = uname_fp.getvalue().rstrip('\n')
-    log.debug('current kernel version is {ver}'.format(ver=cur_version))
+    log.debug('current kernel version is {ver} vs {want}'.format(ver=cur_version,
+                                                                 want=version))
 
     if '.' in str(version):
         # version is utsrelease, yay
@@ -342,17 +344,7 @@ def download_kernel(ctx, config):
             # local package - src is path
             log.info('Copying kernel package {path} to {role}...'.format(
                 path=src, role=role))
-            f = open(src, 'r')
-            proc = role_remote.run(
-                args=[
-                    'python', '-c',
-                    'import shutil, sys; shutil.copyfileobj(sys.stdin, open(sys.argv[1], "wb"))',
-                    remote_pkg_path(role_remote),
-                    ],
-                wait=False,
-                stdin=f
-                )
-            procs[role_remote.name] = proc
+            role_remote.put_file(src,remote_pkg_path(role_remote))
         else:
             # gitbuilder package - src is sha1
             log.info('Downloading kernel {sha1} on {role}...'.format(
@@ -370,7 +362,7 @@ def download_kernel(ctx, config):
             if teuth_config.use_shaman:
                 if role_remote.os.package_type == 'rpm':
                     arch = builder.arch
-                    baseurl = urlparse.urljoin(
+                    baseurl = urljoin(
                         builder.base_url,
                         '/'.join([arch, ''])
                     )
@@ -380,7 +372,7 @@ def download_kernel(ctx, config):
                     )
                 elif role_remote.os.package_type == 'deb':
                     arch = 'amd64'  # FIXME
-                    baseurl = urlparse.urljoin(
+                    baseurl = urljoin(
                         builder.base_url,
                         '/'.join([
                             'pool', 'main', 'l',
@@ -458,14 +450,12 @@ def install_latest_rh_kernel(ctx, config):
 
 def update_rh_kernel(remote):
     package_type = remote.os.package_type
-    output = StringIO()
     remote.run(args=['uname', '-a'])
     import time
     if package_type == 'rpm':
-        remote.run(args=['sudo', 'yum', 'update', '-y', 'kernel'],
-                   stdout=output)
-        log.info(output.getvalue())
-        if not output.getvalue().find("Installed") == -1:
+        update_log = remote.sh('sudo yum update -y kernel')
+        log.info(update_log)
+        if not update_log.find("Installed") == -1:
             log.info("Kernel updated to latest z stream on %s", remote.shortname)
             log.info("Rebooting %s", remote.shortname)
             remote.run(args=['sudo', 'shutdown', '-r', 'now'], wait=False)
@@ -473,7 +463,7 @@ def update_rh_kernel(remote):
             log.info("Reconnecting after reboot")
             remote.reconnect(timeout=300)
             remote.run(args=['uname', '-a'])
-        elif not output.getvalue().find('No packages marked for update') == -1:
+        elif not update_log.find('No packages marked for update') == -1:
             log.info("Latest version already installed on %s", remote.shortname)
 
 
@@ -553,18 +543,14 @@ def install_and_reboot(ctx, config):
         # it's actually nested under that submenu.  If it gets more
         # complex this will totally break.
 
-        cmdout = StringIO()
-        proc = role_remote.run(
-            args=[
+        kernel_entries = role_remote.sh([
                 'egrep',
                 '(submenu|menuentry.*' + kernel_title + ').*{',
                 '/boot/grub/grub.cfg'
-               ],
-            stdout = cmdout,
-            )
+            ]).split('\n')
         submenu_title = ''
         default_title = ''
-        for l in cmdout.getvalue().split('\n'):
+        for l in kernel_entries:
             fields = shlex.split(l)
             if len(fields) >= 2:
                 command, title = fields[:2]
@@ -574,7 +560,6 @@ def install_and_reboot(ctx, config):
                     if title.endswith(kernel_title):
                         default_title = title
                         break
-        cmdout.close()
         log.info('submenu_title:{}'.format(submenu_title))
         log.info('default_title:{}'.format(default_title))
 
@@ -677,6 +662,7 @@ def enable_disable_kdb(ctx, config):
             except run.CommandFailedError:
                 log.warn('Kernel does not support kdb')
 
+
 def wait_for_reboot(ctx, need_install, timeout, distro=False):
     """
     Loop reconnecting and checking kernel versions until
@@ -687,10 +673,14 @@ def wait_for_reboot(ctx, need_install, timeout, distro=False):
     :param timeout: number of second before we timeout.
     """
     import time
+    # do not try to reconnect immediately after triggering the reboot,
+    # because the reboot sequence might not have started yet (!) --
+    # see https://tracker.ceph.com/issues/44187
+    time.sleep(30)
     starttime = time.time()
     while need_install:
         teuthology.reconnect(ctx, timeout)
-        for client in need_install.keys():
+        for client in list(need_install.keys()):
             if 'distro' in str(need_install[client]):
                  distro = True
             log.info('Checking client {client} for new kernel version...'.format(client=client))
@@ -712,6 +702,25 @@ def wait_for_reboot(ctx, need_install, timeout, distro=False):
         time.sleep(1)
 
 
+def get_version_of_running_kernel(remote):
+    """
+    Get the current running kernel version in a format that can be compared
+    with the output of "rpm -q kernel..."
+    """
+    dist_release = remote.os.name
+    uname_r = remote.sh("uname -r").strip()
+    current = None
+    if dist_release in ['opensuse', 'sle']:
+        # "uname -r" returns              4.12.14-lp151.28.36-default
+        # "rpm -q kernel-default" returns 4.12.14-lp151.28.36.1.x86_64
+        # In order to be able to meaningfully check whether the former
+        # is "in" the latter, we have to chop off the "-default".
+        current = re.sub(r"-default$", "", uname_r)
+    else:
+        current = uname_r
+    return current
+
+
 def need_to_install_distro(remote):
     """
     Installing kernels on rpm won't setup grub/boot into them.  This installs
@@ -721,49 +730,51 @@ def need_to_install_distro(remote):
     :returns: False if running the newest distro kernel. Returns the version of
               the newest if it is not running.
     """
+    dist_release = remote.os.name
     package_type = remote.os.package_type
-    output, err_mess = StringIO(), StringIO()
-    remote.run(args=['uname', '-r'], stdout=output)
-    current = output.getvalue().strip()
+    current = get_version_of_running_kernel(remote)
     log.info("Running kernel on {node}: {version}".format(
         node=remote.shortname, version=current))
     installed_version = None
     if package_type == 'rpm':
-        remote.run(args=['sudo', 'yum', 'install', '-y', 'kernel'],
-                   stdout=output)
-        install_stdout = output.getvalue()
-        match = re.search(
-            "Package (.*) already installed",
-            install_stdout, flags=re.MULTILINE)
-        installed_version = match.groups()[0] if match else ''
-        if 'Nothing to do' in install_stdout:
-            err_mess.truncate(0)
-            remote.run(args=['echo', 'no', run.Raw('|'), 'sudo', 'yum',
-                             'reinstall', 'kernel', run.Raw('||'), 'true'],
-                       stderr=err_mess)
-            reinstall_stderr = err_mess.getvalue()
-            if 'Skipping the running kernel' in reinstall_stderr:
-                running_version = re.search(
-                    "Skipping the running kernel: (.*)",
-                    reinstall_stderr, flags=re.MULTILINE).groups()[0]
-                if installed_version == running_version:
-                    log.info(
-                        'Newest distro kernel already installed and running')
-                    return False
-            else:
-                remote.run(args=['sudo', 'yum', 'reinstall', '-y', 'kernel',
-                                 run.Raw('||'), 'true'])
-        # reset stringIO output.
-        output.truncate(0)
+        if dist_release in ['opensuse', 'sle']:
+            install_stdout = remote.sh(
+                'sudo zypper --non-interactive install kernel-default'
+                )
+        else:
+            install_stdout = remote.sh(
+                'sudo yum install -y kernel'
+                )
+            match = re.search(
+                "Package (.*) already installed",
+                install_stdout, flags=re.MULTILINE)
+            if 'Nothing to do' in install_stdout:
+                installed_version = match.groups()[0] if match else ''
+                err_mess = StringIO()
+                err_mess.truncate(0)
+                remote.run(args=['echo', 'no', run.Raw('|'), 'sudo', 'yum',
+                                 'reinstall', 'kernel', run.Raw('||'), 'true'],
+                           stderr=err_mess)
+                reinstall_stderr = err_mess.getvalue()
+                err_mess.close()
+                if 'Skipping the running kernel' in reinstall_stderr:
+                    running_version = re.search(
+                        "Skipping the running kernel: (.*)",
+                        reinstall_stderr, flags=re.MULTILINE).groups()[0]
+                    if installed_version == running_version:
+                        log.info(
+                            'Newest distro kernel already installed and running')
+                        return False
+                else:
+                    remote.run(args=['sudo', 'yum', 'reinstall', '-y', 'kernel',
+                                     run.Raw('||'), 'true'])
         newest = get_latest_image_version_rpm(remote)
 
     if package_type == 'deb':
-        distribution = remote.os.name
-        newest = get_latest_image_version_deb(remote, distribution)
+        newest = get_latest_image_version_deb(remote, dist_release)
 
-    output.close()
-    err_mess.close()
     if current in newest or current.replace('-', '_') in newest:
+        log.info('Newest distro kernel installed and running')
         return False
     log.info(
         'Not newest distro kernel. Current: {cur} Expected: {new}'.format(
@@ -780,15 +791,7 @@ def maybe_generate_initrd_rpm(remote, path, version):
     :param version: kernel version to generate initrd for
                     e.g. 3.18.0-rc6-ceph-00562-g79a9fa5
     """
-    proc = remote.run(
-        args=[
-            'rpm',
-            '--scripts',
-            '-qp',
-            path,
-        ],
-        stdout=StringIO())
-    out = proc.stdout.getvalue()
+    out = remote.sh(['rpm', '--scripts', '-qp', path])
     if 'bin/installkernel' in out or 'bin/kernel-install' in out:
         return
 
@@ -818,27 +821,32 @@ def install_kernel(remote, path=None, version=None):
     :param path:    package path (for local and gitbuilder cases)
     :param version: for RPM distro kernels, pass this to update_grub_rpm
     """
+    dist_release = remote.os.name
     templ = "install_kernel(remote={remote}, path={path}, version={version})"
     log.debug(templ.format(remote=remote, path=path, version=version))
     package_type = remote.os.package_type
     if package_type == 'rpm':
-        if path:
-            version = get_image_version(remote, path)
-            # This is either a gitbuilder or a local package and both of these
-            # could have been built with upstream rpm targets with specs that
-            # don't have a %post section at all, which means no initrd.
-            maybe_generate_initrd_rpm(remote, path, version)
-        elif not version or version == 'distro':
-            version = get_latest_image_version_rpm(remote)
-        update_grub_rpm(remote, version)
+        if dist_release in ['opensuse', 'sle']: 
+            # FIXME
+            pass
+        else:
+            if path:
+                version = get_image_version(remote, path)
+                # This is either a gitbuilder or a local package and both of these
+                # could have been built with upstream rpm targets with specs that
+                # don't have a %post section at all, which means no initrd.
+                maybe_generate_initrd_rpm(remote, path, version)
+            elif not version or version == 'distro':
+                version = get_latest_image_version_rpm(remote)
+            update_grub_rpm(remote, version)
         remote.run( args=['sudo', 'shutdown', '-r', 'now'], wait=False )
         return
 
     if package_type == 'deb':
-        distribution = remote.os.name
-        newversion = get_latest_image_version_deb(remote, distribution)
-        if 'ubuntu' in distribution:
-            grub2conf = teuthology.get_file(remote, '/boot/grub/grub.cfg', True)
+        newversion = get_latest_image_version_deb(remote, dist_release)
+        if 'ubuntu' in dist_release:
+            grub2conf = teuthology.get_file(remote,
+                '/boot/grub/grub.cfg', sudo=True).decode()
             submenu = ''
             menuentry = ''
             for line in grub2conf.split('\n'):
@@ -866,7 +874,7 @@ def install_kernel(remote, path=None, version=None):
             remote.run(args=['sudo', 'shutdown', '-r', 'now'], wait=False )
             return
 
-        if 'debian' in distribution:
+        if 'debian' in dist_release:
             grub2_kernel_select_generic(remote, newversion, 'deb')
             log.info('Distro Kernel Version: {version}'.format(version=newversion))
             remote.run( args=['sudo', 'shutdown', '-r', 'now'], wait=False )
@@ -880,7 +888,7 @@ def update_grub_rpm(remote, newversion):
     grub='grub2'
     # Check if grub2 is isntalled
     try:
-        remote.run(args=['sudo', 'rpm', '-qi', 'grub2'])
+        remote.run(args=['sudo', 'rpm', '-qi', 'grub2-tools'])
     except Exception:
         grub = 'legacy'
     log.info('Updating Grub Version: {grub}'.format(grub=grub))
@@ -913,14 +921,28 @@ def grub2_kernel_select_generic(remote, newversion, ostype):
         grubconfig = '/boot/grub/grub.cfg'
         mkconfig = 'grub-mkconfig'
     remote.run(args=['sudo', mkconfig, '-o', grubconfig, ])
-    grub2conf = teuthology.get_file(remote, grubconfig, True)
+    grub2conf = teuthology.get_file(remote, grubconfig, sudo=True).decode()
     entry_num = 0
-    for line in grub2conf.split('\n'):
-        if line.startswith('menuentry'):
-            if newversion in line:
+    if '\nmenuentry ' not in grub2conf:
+        # okay, do the newer (el8) grub2 thing
+        grub2conf = remote.sh('sudo /bin/ls /boot/loader/entries || true')
+        entry = None
+        for line in grub2conf.split('\n'):
+            if line.endswith('.conf') and newversion in line:
+                entry = line[:-5]  # drop .conf suffix
                 break
-            entry_num += 1
-    remote.run(args=['sudo', grubset, str(entry_num), ])
+    else:
+        # do old menuitem counting thing
+        for line in grub2conf.split('\n'):
+            if line.startswith('menuentry '):
+                if newversion in line:
+                    break
+                entry_num += 1
+        entry = str(entry_num)
+    if entry is None:
+        log.warning('Unable to update grub2 order')
+    else:
+        remote.run(args=['sudo', grubset, entry])
 
 
 def generate_legacy_grub_entry(remote, newversion):
@@ -930,7 +952,8 @@ def generate_legacy_grub_entry(remote, newversion):
     a kernel just via a command. This generates an entry in legacy
     grub for a new kernel version using the existing entry as a base.
     """
-    grubconf = teuthology.get_file(remote, '/boot/grub/grub.conf', True)
+    grubconf = teuthology.get_file(remote,
+        '/boot/grub/grub.conf', sudo=True).decode()
     titleline = ''
     rootline = ''
     kernelline = ''
@@ -987,25 +1010,12 @@ def get_image_version(remote, path):
     :param path: (rpm or deb) package path
     """
     if remote.os.package_type == 'rpm':
-        proc = remote.run(
-            args=[
-                'rpm',
-                '-qlp',
-                path
-            ],
-            stdout=StringIO())
+        files = remote.sh(['rpm', '-qlp', path])
     elif remote.os.package_type == 'deb':
-        proc = remote.run(
-            args=[
-                'dpkg-deb',
-                '-c',
-                path
-            ],
-            stdout=StringIO())
+        files = remote.sh(['dpkg-deb', '-c', path])
     else:
         raise UnsupportedPackageTypeError(remote)
 
-    files = proc.stdout.getvalue()
     for file in files.split('\n'):
         if '/boot/vmlinuz-' in file:
             version = file.split('/boot/vmlinuz-')[1]
@@ -1020,21 +1030,22 @@ def get_latest_image_version_rpm(remote):
     Get kernel image version of the newest kernel rpm package.
     Used for distro case.
     """
-    proc = remote.run(
-        args=[
-            'rpm',
-            '-q',
-            'kernel',
-            '--last',  # order by install time
-            run.Raw('|'),
-            'head',  # only show top/latest kernel
-            '-n',
-            '1',
-        ], stdout=StringIO())
-    for kernel in proc.stdout.getvalue().split():
+    dist_release = remote.os.name
+    kernel_pkg_name = None
+    version = None
+    if dist_release in ['opensuse', 'sle']: 
+        kernel_pkg_name = "kernel-default"
+    else:
+        kernel_pkg_name = "kernel"
+    # get tip of package list ordered by install time
+    newest_package = remote.sh(
+        'rpm -q %s --last | head -n 1' % kernel_pkg_name).strip()
+    for kernel in newest_package.split():
         if kernel.startswith('kernel'):
             if 'ceph' not in kernel:
-                version = kernel.split('kernel-')[1]
+                if dist_release in ['opensuse', 'sle']:
+                    kernel = kernel.split()[0]
+                version = kernel.split(str(kernel_pkg_name) + '-')[1]
     log.debug("get_latest_image_version_rpm: %s", version)
     return version
 
@@ -1112,15 +1123,6 @@ def get_sha1_from_pkg_name(path):
     sha1 = match.group(1) if match else None
     log.debug("get_sha1_from_pkg_name: %s -> %s -> %s", path, basename, sha1)
     return sha1
-
-
-def remove_old_kernels(ctx):
-    for remote in ctx.cluster.remotes.keys():
-        package_type = remote.os.package_type
-        if package_type == 'rpm':
-            log.info("Removing old kernels from %s", remote)
-            args = ['sudo', 'package-cleanup', '-y', '--oldkernels']
-            remote.run(args=args)
 
 
 def task(ctx, config):
@@ -1226,8 +1228,6 @@ def task(ctx, config):
     need_install = {}  # sha1 to dl, or path to rpm or deb
     need_version = {}  # utsrelease or sha1
     kdb = {}
-
-    remove_old_kernels(ctx)
 
     for role, role_config in config.items():
         # gather information about this remote

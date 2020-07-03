@@ -192,7 +192,11 @@ def run_job(job_config, teuth_bin_path, archive_dir, verbose):
     safe_archive = safepath.munge(job_config['name'])
     if job_config.get('first_in_suite') or job_config.get('last_in_suite'):
         if teuth_config.results_server:
-            report.try_delete_jobs(job_config['name'], job_config['job_id'])
+            try:
+                report.try_delete_jobs(job_config['name'], job_config['job_id'])
+            except Exception as e:
+                log.warning("Unable to delete job %s, exception occurred: %s",
+                            job_config['job_id'], e)
         suite_archive_dir = os.path.join(archive_dir, safe_archive)
         safepath.makedirs('/', suite_archive_dir)
         args = [
@@ -254,7 +258,7 @@ def run_job(job_config, teuth_bin_path, archive_dir, verbose):
     arg.append('--')
 
     with tempfile.NamedTemporaryFile(prefix='teuthology-worker.',
-                                     suffix='.tmp',) as tmp:
+                                     suffix='.tmp', mode='w+t') as tmp:
         yaml.safe_dump(data=job_config, stream=tmp)
         tmp.flush()
         arg.append(tmp.name)
@@ -316,33 +320,15 @@ def run_with_watchdog(process, job_config):
         report.try_push_job_info(job_info)
         time.sleep(teuth_config.watchdog_interval)
 
-    # The job finished. Let's make sure paddles knows.
-    branches_sans_reporting = ('argonaut', 'bobtail', 'cuttlefish', 'dumpling')
-    if job_config.get('teuthology_branch') in branches_sans_reporting:
-        # The job ran with a teuthology branch that may not have the reporting
-        # feature. Let's call teuthology-report (which will be from the master
-        # branch) to report the job manually.
-        cmd = "teuthology-report -v -D -r {run_name} -j {job_id}".format(
-            run_name=job_info['name'],
-            job_id=job_info['job_id'])
-        try:
-            log.info("Executing %s" % cmd)
-            report_proc = subprocess.Popen(cmd, shell=True,
-                                           stdout=subprocess.PIPE,
-                                           stderr=subprocess.STDOUT)
-            while report_proc.poll() is None:
-                for line in report_proc.stdout.readlines():
-                    log.info(line.strip())
-                time.sleep(1)
-            log.info("Reported results via the teuthology-report command")
-        except Exception:
-            log.exception("teuthology-report failed")
-    else:
-        # Let's make sure that paddles knows the job is finished. We don't know
-        # the status, but if it was a pass or fail it will have already been
-        # reported to paddles. In that case paddles ignores the 'dead' status.
-        # If the job was killed, paddles will use the 'dead' status.
-        report.try_push_job_info(job_info, dict(status='dead'))
+    # we no longer support testing theses old branches
+    assert(job_config.get('teuthology_branch') not in ('argonaut', 'bobtail',
+                                                       'cuttlefish', 'dumpling'))
+
+    # Let's make sure that paddles knows the job is finished. We don't know
+    # the status, but if it was a pass or fail it will have already been
+    # reported to paddles. In that case paddles ignores the 'dead' status.
+    # If the job was killed, paddles will use the 'dead' status.
+    report.try_push_job_info(job_info, dict(status='dead'))
 
 
 def symlink_worker_log(worker_log_path, archive_dir):

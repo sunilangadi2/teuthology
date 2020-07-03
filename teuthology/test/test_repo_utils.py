@@ -1,4 +1,5 @@
 import logging
+import unittest.mock as mock
 import os
 import os.path
 from pytest import raises, mark
@@ -92,6 +93,26 @@ class TestRepoUtils(object):
         with raises(BranchNotFoundError):
             repo_utils.fetch_branch(self.dest_path, 'nobranch')
 
+    @mark.parametrize('git_str',
+                      ["fatal: couldn't find remote ref",
+                       "fatal: Couldn't find remote ref"])
+    @mock.patch('subprocess.Popen')
+    def test_fetch_branch_different_git_versions(self, mock_popen, git_str):
+        """
+        Newer git versions return a lower case string
+        See: https://github.com/git/git/commit/0b9c3afdbfb629363
+        """
+        branch_name = 'nobranch'
+        process_mock = mock.Mock()
+        attrs = {
+            'wait.return_value': 1,
+            'stdout.read.return_value': f"{git_str} {branch_name}".encode(),
+        }
+        process_mock.configure_mock(**attrs)
+        mock_popen.return_value = process_mock
+        with raises(BranchNotFoundError):
+            repo_utils.fetch_branch('', branch_name)
+
     def test_enforce_existing_branch(self):
         repo_utils.enforce_repo_state(self.repo_url, self.dest_path,
                                       'master')
@@ -171,6 +192,7 @@ class TestRepoUtils(object):
                 pass
 
     URLS_AND_DIRNAMES = [
+        ('git@git.ceph.com/ceph-qa-suite.git', 'git.ceph.com_ceph-qa-suite'),
         ('git://git.ceph.com/ceph-qa-suite.git', 'git.ceph.com_ceph-qa-suite'),
         ('https://github.com/ceph/ceph', 'github.com_ceph_ceph'),
         ('https://github.com/liewegas/ceph.git', 'github.com_liewegas_ceph'),

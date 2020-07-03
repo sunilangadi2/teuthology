@@ -6,6 +6,8 @@ import re
 import time
 import yaml
 
+from humanfriendly import format_timespan
+
 from datetime import datetime
 from tempfile import NamedTemporaryFile
 
@@ -15,9 +17,10 @@ from teuthology.exceptions import (
 )
 from teuthology.misc import deep_merge, get_results_url
 from teuthology.orchestra.opsys import OS
+from teuthology.repo_utils import build_git_url
 
 from teuthology.suite import util
-from teuthology.suite.build_matrix import combine_path, build_matrix
+from teuthology.suite.build_matrix import build_matrix
 from teuthology.suite.placeholder import substitute_placeholders, dict_templ
 
 log = logging.getLogger(__name__)
@@ -46,12 +49,6 @@ class Run(object):
         self.base_config = self.create_initial_config()
         # caches package versions to minimize requests to gbs
         self.package_versions = dict()
-
-        if self.args.suite_dir:
-            self.suite_repo_path = self.args.suite_dir
-        else:
-            self.suite_repo_path = util.fetch_repos(
-                self.base_config.suite_branch, test_name=self.name)
 
         # Interpret any relative paths as being relative to ceph-qa-suite
         # (absolute paths are unchanged by this)
@@ -90,9 +87,15 @@ class Run(object):
         # We don't store ceph_version because we don't use it yet outside of
         # logging.
         self.choose_ceph_version(ceph_hash)
-        teuthology_branch = self.choose_teuthology_branch()
         suite_branch = self.choose_suite_branch()
         suite_hash = self.choose_suite_hash(suite_branch)
+        if self.args.suite_dir:
+            self.suite_repo_path = self.args.suite_dir
+        else:
+            self.suite_repo_path = util.fetch_repos(
+                suite_branch, test_name=self.name)
+        teuthology_branch = self.choose_teuthology_branch()
+
 
         if self.args.distro_version:
             self.args.distro_version, _ = \
@@ -192,21 +195,56 @@ class Run(object):
             log.info('skipping ceph package verification')
 
     def choose_teuthology_branch(self):
+        """Select teuthology branch, check if it is present in repo and
+        return the branch name value.
+
+        The branch name value is determined in the following order:
+
+        Use ``--teuthology-branch`` argument value if supplied.
+
+        Use ``TEUTH_BRANCH`` environment variable value if declared.
+
+        If file ``qa/.teuthology_branch`` can be found in the suite repo
+        supplied with ``--suite-repo`` or ``--suite-dir`` and contains
+        non-empty string then use it as the branch name.
+
+        Use ``teuthology_branch`` value if it is set in the one
+        of the teuthology config files ``$HOME/teuthology.yaml``
+        or ``/etc/teuthology.yaml`` correspondingly.
+
+        Use ``master``.
+
+        Generate exception if the branch is not present in the repo.
+        """
         teuthology_branch = self.args.teuthology_branch
-        if teuthology_branch and teuthology_branch != 'master':
-            if not util.git_branch_exists('teuthology', teuthology_branch):
-                exc = BranchNotFoundError(teuthology_branch, 'teuthology.git')
-                util.schedule_fail(message=str(exc), name=self.name)
-        elif not teuthology_branch:
-            # Decide what branch of teuthology to use
-            if util.git_branch_exists('teuthology', self.args.ceph_branch):
-                teuthology_branch = self.args.ceph_branch
-            else:
-                log.info(
-                    "branch {0} not in teuthology.git; will use master for"
-                    " teuthology".format(self.args.ceph_branch))
-                teuthology_branch = 'master'
-        log.info("teuthology branch: %s", teuthology_branch)
+        if not teuthology_branch:
+            teuthology_branch = os.environ.get('TEUTH_BRANCH', None)
+        if not teuthology_branch:
+            branch_file_path = self.suite_repo_path + '/qa/.teuthology_branch'
+            log.debug('Check file %s exists', branch_file_path)
+            if os.path.exists(branch_file_path):
+                log.debug('Found teuthology branch config file %s',
+                                                        branch_file_path)
+                with open(branch_file_path) as f:
+                    teuthology_branch = f.read().strip()
+                    if teuthology_branch:
+                        log.debug(
+                            'The teuthology branch is overridden with %s',
+                                                                teuthology_branch)
+                    else:
+                        log.warning(
+                            'The teuthology branch config is empty, skipping')
+        if not teuthology_branch:
+            teuthology_branch = config.get('teuthology_branch', 'master')
+
+        teuthology_hash = util.git_ls_remote(
+            'teuthology',
+            teuthology_branch
+        )
+        if not teuthology_hash:
+            exc = BranchNotFoundError(teuthology_branch, build_git_url('teuthology'))
+            util.schedule_fail(message=str(exc), name=self.name)
+        log.info("teuthology branch: %s %s", teuthology_branch, teuthology_hash)
         return teuthology_branch
 
     @property
@@ -276,12 +314,13 @@ class Run(object):
             job_config.email = self.args.email
         if self.args.owner:
             job_config.owner = self.args.owner
+        if self.args.sleep_before_teardown:
+            job_config.sleep_before_teardown = int(self.args.sleep_before_teardown)
         return job_config
 
     def build_base_args(self):
         base_args = [
             '--name', self.name,
-            '--num', str(self.args.num),
             '--worker', util.get_worker(self.args.machine_type),
         ]
         if self.args.dry_run:
@@ -346,40 +385,15 @@ class Run(object):
         if num_jobs:
             self.write_result()
 
-    def collect_jobs(self, arch, configs, newest=False):
+    def collect_jobs(self, arch, configs, newest=False, limit=0):
         jobs_to_schedule = []
         jobs_missing_packages = []
         for description, fragment_paths in configs:
-            base_frag_paths = [
-                util.strip_fragment_path(x) for x in fragment_paths
-            ]
-            limit = self.args.limit
             if limit > 0 and len(jobs_to_schedule) >= limit:
                 log.info(
                     'Stopped after {limit} jobs due to --limit={limit}'.format(
                         limit=limit))
                 break
-            # Break apart the filter parameter (one string) into comma
-            # separated components to be used in searches.
-            filter_in = self.args.filter_in
-            if filter_in:
-                if not any([x in description for x in filter_in]):
-                    for filt_samp in filter_in:
-                        if any(x.find(filt_samp) >= 0 for x in base_frag_paths):
-                            break
-                    else:
-                        continue
-            filter_out = self.args.filter_out
-            if filter_out:
-                if any([x in description for x in filter_out]):
-                    continue
-                is_collected = True
-                for filt_samp in filter_out:
-                    if any(filt_samp in x for x in base_frag_paths):
-                        is_collected = False
-                        break
-                if not is_collected:
-                    continue
 
             raw_yaml = '\n'.join([open(a, 'r').read() for a in fragment_paths])
 
@@ -400,6 +414,7 @@ class Run(object):
 
             arg = copy.deepcopy(self.base_args)
             arg.extend([
+                '--num', str(self.args.num),
                 '--description', description,
                 '--',
             ])
@@ -414,7 +429,8 @@ class Run(object):
             )
 
             sha1 = self.base_config.sha1
-            if config.suite_verify_ceph_hash:
+            if parsed_yaml.get('verify_ceph_hash',
+                               config.suite_verify_ceph_hash):
                 full_job_config = copy.deepcopy(self.base_config.to_dict())
                 deep_merge(full_job_config, parsed_yaml)
                 flavor = util.get_install_task_flavor(full_job_config)
@@ -476,6 +492,7 @@ class Run(object):
                 log.info("pause between jobs : --throttle " + str(throttle))
                 time.sleep(int(throttle))
 
+
     def schedule_suite(self):
         """
         Schedule the suite-run. Returns the number of jobs scheduled.
@@ -490,10 +507,9 @@ class Run(object):
             self.base_config.suite.replace(':', '/'),
         ))
         log.debug('Suite %s in %s' % (suite_name, suite_path))
-        configs = [
-            (combine_path(suite_name, item[0]), item[1]) for item in
-            build_matrix(suite_path, subset=self.args.subset, seed=self.args.seed)
-        ]
+        configs = build_matrix(suite_path,
+                               subset=self.args.subset,
+                               seed=self.args.seed)
         log.info('Suite %s in %s generated %d jobs (not yet filtered)' % (
             suite_name, suite_path, len(configs)))
 
@@ -508,13 +524,53 @@ class Run(object):
         ).name
         self.base_yaml_paths.insert(0, base_yaml_path)
 
+        # compute job limit in respect of --sleep-before-teardown
+        job_limit = self.args.limit or 0
+        sleep_before_teardown = int(self.args.sleep_before_teardown or 0)
+        if sleep_before_teardown:
+            if job_limit == 0:
+                log.warning('The --sleep-before-teardown option was provided: '
+                            'only 1 job will be scheduled. '
+                            'Use --limit to run more jobs')
+                # give user a moment to read this warning
+                time.sleep(5)
+                job_limit = 1
+            elif self.args.non_interactive:
+                log.warning(
+                    'The --sleep-before-teardown option is active. '
+                    'There will be a maximum {} jobs running '
+                    'which will fall asleep for {}'
+                    .format(job_limit, format_timespan(sleep_before_teardown)))
+            elif job_limit > 4:
+                are_you_insane=(
+                    'There are {total} configs and {maximum} job limit is used. '
+                    'Do you really want to lock all machines needed for '
+                    'this run for {that_long}? (y/N):'
+                    .format(
+                        that_long=format_timespan(sleep_before_teardown),
+                        total=len(configs),
+                        maximum=job_limit))
+                while True:
+                    insane=(input(are_you_insane) or 'n').lower()
+                    if insane == 'y':
+                        break
+                    elif insane == 'n':
+                        exit(0)
+
         # if newest, do this until there are no missing packages
         # if not, do it once
         backtrack = 0
         limit = self.args.newest
         while backtrack <= limit:
             jobs_missing_packages, jobs_to_schedule = \
-                self.collect_jobs(arch, configs, self.args.newest)
+                self.collect_jobs(arch,
+                    util.filter_configs(configs,
+                        filter_in=self.args.filter_in,
+                        filter_out=self.args.filter_out,
+                        filter_all=self.args.filter_all,
+                        filter_fragments=self.args.filter_fragments,
+                        suite_name=suite_name),
+                                  self.args.newest, job_limit)
             if jobs_missing_packages and self.args.newest:
                 new_sha1 = \
                     util.find_git_parent('ceph', self.base_config.sha1)
@@ -540,7 +596,7 @@ class Run(object):
             log.debug("Base job config:\n%s" % self.base_config)
 
         with open(base_yaml_path, 'w+b') as base_yaml:
-            base_yaml.write(str(self.base_config))
+            base_yaml.write(str(self.base_config).encode())
 
         if jobs_to_schedule:
             self.write_rerun_memo()

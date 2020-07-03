@@ -24,7 +24,7 @@ class TestBuildMatrix(object):
         'os.listdir',
         'os.path.isfile',
         'os.path.isdir',
-        '__builtin__.open',
+        'teuthology.suite.open',
     ]
 
     def setup(self):
@@ -582,7 +582,7 @@ class TestSubset(object):
         'os.listdir',
         'os.path.isfile',
         'os.path.isdir',
-        '__builtin__.open',
+        'teuthology.suite.open',
     ]
 
     def setup(self):
@@ -637,9 +637,9 @@ class TestSubset(object):
                     sub_max_facets, max_fanout,
                     max_depth - 1, namegen, top=False)
                 if subtree is not None:
-                    tree[namegen.next()] = subtree
+                    tree['d' + next(namegen)] = subtree
                 else:
-                    tree[yamilify(namegen.next())] = None
+                    tree[yamilify('f' + next(namegen))] = None
             random.choice([
                 lambda: tree.update({'%': None}),
                 lambda: None])()
@@ -680,7 +680,12 @@ class TestSubset(object):
                     ret += ('\t'*tabs) + (k + ':').ljust(10) + "\n"
                     ret += pptree(v, tabs+1)
             return ret
-        for facet in flatten(tree):
+        def deyamlify(name):
+            if name.endswith('.yaml'):
+                return name[:-5]
+            else:
+                return name
+        for facet in (deyamlify(_) for _ in flatten(tree)):
             found = False
             for i in description_list:
                 if facet in i:

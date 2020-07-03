@@ -6,12 +6,11 @@ import os
 
 from teuthology.util.flock import FileLock
 
-
 def get_user_ssh_pubkey(path='~/.ssh/id_rsa.pub'):
     full_path = os.path.expanduser(path)
     if not os.path.exists(full_path):
         return
-    with open(full_path, 'rb') as f:
+    with open(full_path) as f:
         return f.read().strip()
 
 
@@ -57,7 +56,7 @@ def selective_update(a, b, func):
             continue
         if isinstance(value, dict):
             selective_update(a[key], value, func)
-        if func(value, a[key]):
+        elif func(value, a[key]):
             a[key] = value
 
 

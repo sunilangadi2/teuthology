@@ -27,14 +27,16 @@ def split_user(user_at_host):
 
 def create_key(keytype, key):
     """
-    Create an ssh-rsa or ssh-dss key.
+    Create an ssh-rsa, ssh-dss or ssh-ed25519 key.
     """
     if keytype == 'ssh-rsa':
-        return paramiko.rsakey.RSAKey(data=base64.decodestring(key))
+        return paramiko.rsakey.RSAKey(data=base64.decodestring(key.encode()))
     elif keytype == 'ssh-dss':
-        return paramiko.dsskey.DSSKey(data=base64.decodestring(key))
+        return paramiko.dsskey.DSSKey(data=base64.decodestring(key.encode()))
+    elif keytype == 'ssh-ed25519':
+        return paramiko.ed25519key.Ed25519Key(data=base64.decodestring(key.encode()))
     else:
-        raise ValueError('keytype must be ssh-rsa or ssh-dss (DSA)')
+        raise ValueError('keytype must be ssh-rsa, ssh-dss (DSA) or ssh-ed25519')
 
 
 def connect(user_at_host, host_key=None, keep_alive=False, timeout=60,
@@ -89,7 +91,10 @@ def connect(user_at_host, host_key=None, keep_alive=False, timeout=60,
             key_filename = opts['identityfile']
 
     if key_filename:
-        connect_args['key_filename'] = os.path.expanduser(key_filename)
+        if not isinstance(key_filename, list):
+            key_filename = [key_filename]
+        key_filename = [os.path.expanduser(f) for f in key_filename]
+        connect_args['key_filename'] = key_filename
 
     log.debug(connect_args)
 

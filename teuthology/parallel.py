@@ -5,6 +5,7 @@ import gevent
 import gevent.pool
 import gevent.queue
 
+
 log = logging.getLogger(__name__)
 
 
@@ -26,13 +27,11 @@ def capture_traceback(func, *args, **kwargs):
 
 def resurrect_traceback(exc):
     if isinstance(exc, ExceptionHolder):
-        exc_info = exc.exc_info
+        raise exc.exc_info[1]
     elif isinstance(exc, BaseException):
-        exc_info = (type(exc), exc, None)
+        raise exc
     else:
         return
-
-    raise exc_info[0], exc_info[1], exc_info[2]
 
 
 class parallel(object):
@@ -90,7 +89,7 @@ class parallel(object):
     def __iter__(self):
         return self
 
-    def next(self):
+    def __next__(self):
         if not self.any_spawned or self.iteration_stopped:
             raise StopIteration()
         result = self.results.get()
@@ -102,6 +101,8 @@ class parallel(object):
             raise
 
         return result
+
+    next = __next__
 
     def _finish(self, greenlet):
         if greenlet.successful():

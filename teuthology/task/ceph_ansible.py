@@ -4,12 +4,10 @@ import re
 import logging
 import yaml
 
-from cStringIO import StringIO
-
 from teuthology.task import Task
 from tempfile import NamedTemporaryFile
 from teuthology.config import config as teuth_config
-from teuthology.misc import get_scratch_devices
+from teuthology.misc import get_scratch_devices, get_file
 from teuthology import contextutil
 from teuthology.orchestra import run
 from teuthology import misc
@@ -85,15 +83,11 @@ class CephAnsible(Task):
         # generate playbook file if it exists in config
         self.playbook_file = None
         if self.playbook is not None:
-            pb_buffer = StringIO()
-            pb_buffer.write('---\n')
-            yaml.safe_dump(self.playbook, pb_buffer)
-            pb_buffer.seek(0)
             playbook_file = NamedTemporaryFile(
                prefix="ceph_ansible_playbook_", dir='/tmp/',
                delete=False,
             )
-            playbook_file.write(pb_buffer.read())
+            yaml.safe_dump(self.playbook, playbook_file, explicit_start=True)
             playbook_file.flush()
             self.playbook_file = playbook_file.name
         # everything from vars in config go into group_vars/all file
@@ -148,9 +142,9 @@ class CephAnsible(Task):
                 elif hostname not in hosts_dict[group]:
                     hosts_dict[group][hostname] = host_vars
 
-        hosts_stringio = StringIO()
+        hosts_content = ''
         for group in sorted(hosts_dict.keys()):
-            hosts_stringio.write('[%s]\n' % group)
+            hosts_content += '[%s]\n' % group
             for hostname in sorted(hosts_dict[group].keys()):
                 vars = hosts_dict[group][hostname]
                 if vars:
@@ -165,11 +159,10 @@ class CephAnsible(Task):
                     )
                 else:
                     host_line = hostname
-                hosts_stringio.write('%s\n' % host_line)
-            hosts_stringio.write('\n')
-        hosts_stringio.seek(0)
+                hosts_content += '%s\n' % host_line
+            hosts_content += '\n'
         self.inventory = self._write_hosts_file(prefix='teuth_ansible_hosts_',
-                                                content=hosts_stringio.read().strip())
+                                                content=hosts_content.strip())
         self.generated_inventory = True
 
     def begin(self):
@@ -180,7 +173,7 @@ class CephAnsible(Task):
         """
         Actually write the hosts file
         """
-        hosts_file = NamedTemporaryFile(prefix=prefix,
+        hosts_file = NamedTemporaryFile(prefix=prefix, mode='w+',
                                         delete=False)
         hosts_file.write(content)
         hosts_file.flush()
@@ -255,18 +248,6 @@ class CephAnsible(Task):
                         'libffi-dev',
                         'python-dev'
                     ])
-            else:
-                # cleanup rpm packages the task installed
-                installer_node.run(args=[
-                    'sudo',
-                    'yum',
-                    'remove',
-                    '-y',
-                    'libffi-devel',
-                    'python-devel',
-                    'openssl-devel',
-                    'libselinux-python'
-                ])
 
     def collect_logs(self):
         ctx = self.ctx
@@ -302,15 +283,10 @@ class CephAnsible(Task):
             log.info("Waiting for Ceph health to reach HEALTH_OK \
                         or HEALTH WARN")
             while proceed():
-                out = StringIO()
-                remote.run(
-                    args=['sudo', 'ceph', '--cluster', self.cluster_name,
-                          'health'], 
-                    stdout=out,
-                )
-                out = out.getvalue().split(None, 1)[0]
-                log.info("cluster in state: %s", out)
-                if out in ('HEALTH_OK', 'HEALTH_WARN'):
+                out = remote.sh('sudo ceph --cluster %s health' % self.cluster_name)
+                state = out.split(None, 1)[0]
+                log.info("cluster in state: %s", state)
+                if state in ('HEALTH_OK', 'HEALTH_WARN'):
                     break
 
     def get_host_vars(self, remote):
@@ -320,7 +296,22 @@ class CephAnsible(Task):
             roles = self.ctx.cluster.remotes[remote]
             dev_needed = len([role for role in roles
                               if role.startswith('osd')])
-            host_vars['devices'] = get_scratch_devices(remote)[0:dev_needed]
+            if teuth_config.get('ceph_ansible') and \
+                    self.ctx.machine_type in teuth_config['ceph_ansible']['has_lvm_scratch_disks']:
+                devices = get_file(remote, "/scratch_devs").decode().split()
+                vols = []
+
+                for dev in devices:
+                   if 'vg_nvme' in dev:
+                       splitpath = dev.split('/')
+                       vol = dict()
+                       vol['data_vg'] = splitpath[2]
+                       vol['data'] = splitpath[3]
+                       vols.append(vol)
+                extra_vars['lvm_volumes'] = vols
+                self.config.update({'vars': extra_vars})
+            else:
+                host_vars['devices'] = get_scratch_devices(remote)[0:dev_needed]
         if 'monitor_interface' not in extra_vars:
             host_vars['monitor_interface'] = remote.interface
         if 'radosgw_interface' not in extra_vars:
@@ -339,10 +330,9 @@ class CephAnsible(Task):
             '.'
         ])
         self._copy_and_print_config()
-        out = StringIO()
         str_args = ' '.join(args)
-        ceph_installer.run(
-            args=[
+        out = ceph_installer.sh(
+            [
                 'cd',
                 'ceph-ansible',
                 run.Raw(';'),
@@ -350,10 +340,9 @@ class CephAnsible(Task):
             ],
             timeout=4200,
             check_status=False,
-            stdout=out
         )
-        log.info(out.getvalue())
-        if re.search(r'all hosts have already failed', out.getvalue()):
+        log.info(out)
+        if re.search(r'all hosts have already failed', out):
             log.error("Failed during ceph-ansible execution")
             raise CephAnsibleError("Failed during ceph-ansible execution")
         self._create_rbd_pool()
@@ -362,26 +351,7 @@ class CephAnsible(Task):
         # setup ansible on first mon node
         ceph_installer = self.ceph_installer
         args = self.args
-        if ceph_installer.os.package_type == 'rpm':
-            # handle selinux init issues during purge-cluster
-            # https://bugzilla.redhat.com/show_bug.cgi?id=1364703
-            ceph_installer.run(
-                args=[
-                    'sudo', 'yum', 'remove', '-y', 'libselinux-python'
-                ]
-            )
-            # install crypto/selinux packages for ansible
-            ceph_installer.run(args=[
-                'sudo',
-                'yum',
-                'install',
-                '-y',
-                'libffi-devel',
-                'python-devel',
-                'openssl-devel',
-                'libselinux-python'
-            ])
-        else:
+        if ceph_installer.os.package_type == 'deb':
             # update ansible from ppa
             ceph_installer.run(args=[
                 'sudo',
@@ -435,6 +405,7 @@ class CephAnsible(Task):
             run.Raw(';'),
             'virtualenv',
             run.Raw('--system-site-packages'),
+            run.Raw('--python=python3'),
             'venv',
             run.Raw(';'),
             run.Raw('source venv/bin/activate'),
@@ -443,6 +414,11 @@ class CephAnsible(Task):
             'install',
             '--upgrade',
             'pip',
+            run.Raw(';'),
+            'pip',
+            'install',
+            '--upgrade',
+            'cryptography>=2.5',
             run.Raw(';'),
             'pip',
             'install',
@@ -480,9 +456,9 @@ class CephAnsible(Task):
             # copy extra vars to groups/all
             ceph_installer.put_file(self.extra_vars_file, 'ceph-ansible/group_vars/all')
             # print for debug info
-            ceph_installer.run(args=('cat', 'ceph-ansible/inven.yml'))
-            ceph_installer.run(args=('cat', 'ceph-ansible/site.yml'))
-            ceph_installer.run(args=('cat', 'ceph-ansible/group_vars/all'))
+            ceph_installer.run(args=['cat', 'ceph-ansible/inven.yml'])
+            ceph_installer.run(args=['cat', 'ceph-ansible/site.yml'])
+            ceph_installer.run(args=['cat', 'ceph-ansible/group_vars/all'])
 
     def _create_rbd_pool(self):
         mon_node = self.ceph_first_mon

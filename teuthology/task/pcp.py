@@ -6,14 +6,13 @@ import logging
 import os
 import requests
 import time
-import urllib
-import urlparse
+
+from teuthology.util.compat import urljoin, urlencode
 
 from teuthology.config import config as teuth_config
 from teuthology.orchestra import run
 
 from teuthology import misc
-
 from teuthology.task import Task
 
 log = logging.getLogger(__name__)
@@ -54,7 +53,7 @@ class PCPArchive(PCPDataSource):
 
     @staticmethod
     def _format_time(seconds):
-        if isinstance(seconds, basestring):
+        if isinstance(seconds, str):
             return seconds
         return "@ %s" % time.asctime(time.gmtime(seconds))
 
@@ -64,7 +63,7 @@ class PCPGrapher(PCPDataSource):
 
     def __init__(self, hosts, time_from, time_until='now'):
         super(PCPGrapher, self).__init__(hosts, time_from, time_until)
-        self.base_url = urlparse.urljoin(
+        self.base_url = urljoin(
             teuth_config.pcp_host,
             self._endpoint)
 
@@ -83,13 +82,13 @@ class GrafanaGrapher(PCPGrapher):
         )
         if self.time_until:
             config['time_to'] = self._format_time(self.time_until)
-        args = urllib.urlencode(config)
+        args = urlencode(config)
         template = "{base_url}?{args}"
         return template.format(base_url=self.base_url, args=args)
 
     @staticmethod
     def _format_time(seconds):
-        if isinstance(seconds, basestring):
+        if isinstance(seconds, str):
             return seconds
         seconds = int(seconds)
         dt = datetime.datetime.fromtimestamp(seconds, dateutil.tz.tzutc())
@@ -183,7 +182,7 @@ class GraphiteGrapher(PCPGrapher):
             # 'target=' arg
             'target': self.get_target_globs(metric),
         })
-        args = urllib.urlencode(config, doseq=True)
+        args = urlencode(config, doseq=True)
         template = "{base_url}?{args}"
         return template.format(base_url=self.base_url, args=args)
 

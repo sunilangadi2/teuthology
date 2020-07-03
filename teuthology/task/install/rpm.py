@@ -82,6 +82,10 @@ def _zypper_addrepo(remote, repo_list):
                 'sudo', 'zypper', '-n', 'addrepo', '--refresh', '--no-gpgcheck',
                 repo['url'], repo['name'],
             ])
+        # Because 'zypper addrepo --check' does not work as expected
+        # we need call zypper ref in order to fail early if the repo
+        # is invalid
+        remote.run(args='sudo zypper ref ' + repo['name'])
 
 def _zypper_removerepo(remote, repo_list):
     """
@@ -96,6 +100,17 @@ def _zypper_removerepo(remote, repo_list):
             'sudo', 'zypper', '-n', 'removerepo', repo['name'],
         ])
 
+def _zypper_wipe_all_repos(remote):
+    """
+    Completely "wipe" (remove) all zypper repos
+
+    :param remote: remote node where to wipe zypper repos
+    :return:
+    """
+    log.info("Wiping zypper repos (if any)")
+    remote.sh('sudo zypper repos -upEP && '
+              'sudo rm -f /etc/zypp/repos.d/* || '
+              'true')
 
 def _downgrade_packages(ctx, remote, pkgs, pkg_version, config):
     """
@@ -160,6 +175,7 @@ def _update_package_list_and_install(ctx, remote, rpm, config):
     if repos:
         log.debug("Adding repos: %s" % repos)
         if dist_release in ['opensuse', 'sle']:
+            _zypper_wipe_all_repos(remote)
             _zypper_addrepo(remote, repos)
         else:
             raise Exception('Custom repos were specified for %s ' % remote_os +
@@ -298,6 +314,7 @@ def _yum_set_check_obsoletes(remote):
     conf_path = '/etc/yum/pluginconf.d/priorities.conf'
     conf_path_orig = conf_path + '.orig'
     cmd = [
+        'sudo', 'touch', '-a', '/etc/yum/pluginconf.d/priorities.conf', run.Raw(';'),
         'test', '-e', conf_path_orig, run.Raw('||'), 'sudo', 'cp', '-af',
         conf_path, conf_path_orig,
     ]

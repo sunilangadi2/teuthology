@@ -7,7 +7,7 @@ class Script(object):
 
     def test_help(self):
         args = (self.script_name, '--help')
-        out = subprocess.check_output(args)
+        out = subprocess.check_output(args).decode()
         assert out.startswith('usage')
 
     def test_invalid(self):

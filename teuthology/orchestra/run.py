@@ -1,7 +1,9 @@
 """
 Paramiko run support
 """
-from cStringIO import StringIO
+
+import io
+
 from paramiko import ChannelFile
 
 import gevent
@@ -59,10 +61,10 @@ class RemoteProcess(object):
         """
         self.client = client
         self.args = args
-        if isinstance(args, basestring):
-            self.command = args
-        else:
+        if isinstance(args, list):
             self.command = quote(args)
+        else:
+            self.command = args
 
         if cwd:
             self.command = '(cd {cwd} && exec {cmd})'.format(
@@ -87,12 +89,8 @@ class RemoteProcess(object):
         """
         Execute remote command
         """
-        prefix = "Running:"
-        if self.label:
-            prefix = "Running ({label}):".format(label=self.label)
-        log.getChild(self.hostname).info(prefix)
         for line in self.command.split('\n'):
-            log.getChild(self.hostname).info('> %s' % line)
+            log.getChild(self.hostname).info('%s> %s' % (self.label or '', line))
 
         if hasattr(self, 'timeout'):
             (self._stdin_buf, self._stdout_buf, self._stderr_buf) = \
@@ -245,9 +243,6 @@ def quote(args):
     """
     Internal quote wrapper.
     """
-    if isinstance(args, basestring):
-        return args
-
     def _quote(args):
         """
         Handle quoted string, testing for raw charaters.
@@ -257,7 +252,10 @@ def quote(args):
                 yield a.value
             else:
                 yield pipes.quote(a)
-    return ' '.join(_quote(args))
+    if isinstance(args, list):
+        return ' '.join(_quote(args))
+    else:
+        return args
 
 
 def copy_to_log(f, logger, loglevel=logging.INFO, capture=None):
@@ -272,15 +270,24 @@ def copy_to_log(f, logger, loglevel=logging.INFO, capture=None):
     # Work-around for http://tracker.ceph.com/issues/8313
     if isinstance(f, ChannelFile):
         f._flags += ChannelFile.FLAG_BINARY
-
     for line in f:
         if capture:
-            capture.write(line)
+            if isinstance(capture, io.StringIO):
+                if isinstance(line, str):
+                    capture.write(line)
+                else:
+                    capture.write(line.decode('utf-8', 'replace'))
+            elif isinstance(capture, io.BytesIO):
+                if isinstance(line, str):
+                    capture.write(line.encode())
+                else:
+                    capture.write(line)
         line = line.rstrip()
         # Second part of work-around for http://tracker.ceph.com/issues/8313
         try:
-            line = unicode(line, 'utf-8', 'replace').encode('utf-8')
-            logger.log(loglevel, line.decode('utf-8'))
+            if isinstance(line, bytes):
+                line = line.decode('utf-8', 'replace')
+            logger.log(loglevel, line)
         except (UnicodeDecodeError, UnicodeEncodeError):
             logger.exception("Encountered unprintable line in command output")
 
@@ -290,8 +297,10 @@ def copy_and_close(src, fdst):
     copyfileobj call wrapper.
     """
     if src is not None:
-        if isinstance(src, basestring):
-            src = StringIO(src)
+        if isinstance(src, bytes):
+            src = io.BytesIO(src)
+        elif isinstance(src, str):
+            src = io.StringIO(src)
         shutil.copyfileobj(src, fdst)
     fdst.close()
 
@@ -449,7 +458,7 @@ def wait(processes, timeout=None):
     if timeout:
         log.info("waiting for %d", timeout)
     if timeout and timeout > 0:
-        with safe_while(tries=(timeout / 6)) as check_time:
+        with safe_while(tries=(timeout // 6)) as check_time:
             not_ready = list(processes)
             while len(not_ready) > 0:
                 check_time()

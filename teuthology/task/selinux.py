@@ -1,7 +1,7 @@
 import logging
 import os
 
-from cStringIO import StringIO
+from io import StringIO
 
 from teuthology.exceptions import SELinuxError
 from teuthology.misc import get_archive_dir
@@ -53,6 +53,10 @@ class SELinux(Task):
             if remote.is_vm:
                 msg = "Excluding {host}: VMs are not yet supported"
                 log.info(msg.format(host=remote.shortname))
+            elif remote.os.name in ['opensuse', 'sle']:
+                msg = "Excluding {host}: \
+                        SELinux is not supported for '{os}' os_type yet"
+                log.info(msg.format(host=remote.shortname, os=remote.os.name))
             elif remote.os.package_type == 'rpm':
                 new_cluster.add(remote, roles)
             else:
@@ -122,6 +126,10 @@ class SELinux(Task):
             'tcontext=system_u:system_r:nrpe_t:s0',
             'comm="updatedb"',
             'comm="smartd"',
+            'comm="rhsmcertd-worke"',
+            'comm="setroubleshootd"',
+            'comm="rpm"',
+            'tcontext=system_u:object_r:container_runtime_exec_t:s0',
         ]
         se_whitelist = self.config.get('whitelist', [])
         if se_whitelist:
@@ -129,8 +137,8 @@ class SELinux(Task):
         ignore_known_denials = '\'\(' + str.join('\|', known_denials) + '\)\''
         for remote in self.cluster.remotes.keys():
             proc = remote.run(
-                args=['sudo', 'grep', 'avc: .*denied',
-                      '/var/log/audit/audit.log', run.Raw('|'), 'grep', '-v',
+                args=['sudo', 'grep', '-a', 'avc: .*denied',
+                      '/var/log/audit/audit.log', run.Raw('|'), 'grep', '-av',
                       run.Raw(ignore_known_denials)],
                 stdout=StringIO(),
                 check_status=False,

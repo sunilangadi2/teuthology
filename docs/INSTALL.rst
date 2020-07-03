@@ -33,11 +33,11 @@ First install the non-PyPI dependencies::
 
 Next, clone its `git repository <https://github.com/ceph/teuthology/>`__,
 create a `virtualenv <http://virtualenv.readthedocs.org/en/latest/>`__, and
-install dependencies::
+install dependencies. The instructions are given below::
 
     git clone https://github.com/ceph/teuthology/
     cd teuthology
-    virtualenv ./virtualenv
+    virtualenv --python python3 ./virtualenv
     source virtualenv/bin/activate
     pip install --upgrade pip
     pip install -r requirements.txt
@@ -54,3 +54,32 @@ However if you prefer, you may install ``teuthology`` from `PyPI <http://pypi.py
 
 **Note**: The version in PyPI can be (*far*) behind the development version.
 
+Or from GitHub::
+
+    pip install git+https://github.com/ceph/teuthology#egg=teuthology[orchestra]
+
+where the dependencies for orchestrating are installed. They are used for
+interacting with the services to schedule tests and to report the test results.
+
+
+Update Dependencies
+-------------------
+
+We track the dependencies using ``requirements.txt`` . These packages are
+tested, and should work  with teuthology. But if you want to bump up the
+versions of them, please use the following command to update these files::
+
+  ./update-requirements.sh
+
+Please upgrade pip-tool using following command ::
+
+  pip install pip-tools --upgrade
+
+if the command above fails like::
+
+  Traceback (most recent call last):
+  File "/home/kchai/teuthology/virtualenv/bin/pip-compile", line 5, in <module>
+    from piptools.scripts.compile import cli
+  File "/home/kchai/teuthology/virtualenv/local/lib/python2.7/site-packages/piptools/scripts/compile.py", line 11, in <module>
+    from pip.req import InstallRequirement, parse_requirements
+  ImportError: No module named req

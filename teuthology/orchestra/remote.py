@@ -1,23 +1,24 @@
 """
 Support for paramiko remote objects.
 """
+
 import teuthology.lock.query
 import teuthology.lock.util
 from teuthology.orchestra import run
+from teuthology.orchestra import connection
+from teuthology.orchestra import console
 from teuthology.orchestra.opsys import OS
-import connection
 from teuthology import misc
+from teuthology.exceptions import CommandFailedError
 from teuthology.misc import host_shortname
 import time
 import re
 import logging
-from cStringIO import StringIO
+from io import BytesIO
 import os
 import pwd
 import tempfile
 import netaddr
-
-import console
 
 log = logging.getLogger(__name__)
 
@@ -123,14 +124,9 @@ class Remote(object):
         return self._cidr
 
     def _set_iface_and_cidr(self):
-        proc = self.run(
-            args=['PATH=/sbin:/usr/sbin', 'ip', 'addr', 'show'],
-            stdout=StringIO(),
-        )
-        proc.wait()
+        ip_addr_show = self.sh('PATH=/sbin:/usr/sbin ip addr show')
         regexp = 'inet.? %s' % self.ip_address
-        proc.stdout.seek(0)
-        for line in proc.stdout.readlines():
+        for line in ip_addr_show.split('\n'):
             line = line.strip()
             if re.match(regexp, line):
                 items = line.split()
@@ -142,9 +138,7 @@ class Remote(object):
     @property
     def hostname(self):
         if not hasattr(self, '_hostname'):
-            proc = self.run(args=['hostname', '--fqdn'], stdout=StringIO())
-            proc.wait()
-            self._hostname = proc.stdout.getvalue().strip()
+            self._hostname = self.sh('hostname --fqdn').strip()
         return self._hostname
 
     @property
@@ -166,6 +160,8 @@ class Remote(object):
     def is_online(self):
         if self.ssh is None:
             return False
+        if self.ssh.get_transport() is None:
+            return False
         try:
             self.run(args="true")
         except Exception:
@@ -173,8 +169,11 @@ class Remote(object):
         return self.ssh.get_transport().is_active()
 
     def ensure_online(self):
+        if self.is_online:
+            return
+        self.connect()
         if not self.is_online:
-            return self.connect()
+            raise Exception('unable to connect')
 
     @property
     def system_type(self):
@@ -243,12 +242,15 @@ class Remote(object):
             remote_date = remote.sh('date')
         """
         if 'stdout' not in kwargs:
-            kwargs['stdout'] = StringIO()
+            kwargs['stdout'] = BytesIO()
         if 'args' not in kwargs:
             kwargs['args'] = script
-        proc=self.run(**kwargs)
-        return proc.stdout.getvalue()
-
+        proc = self.run(**kwargs)
+        out = proc.stdout.getvalue()
+        if isinstance(out, bytes):
+            return out.decode()
+        else:
+            return out
 
     def sh_file(self, script, label="script", sudo=False, **kwargs):
         """
@@ -262,7 +264,7 @@ class Remote(object):
         """
         ftempl = '/tmp/teuthology-remote-$(date +%Y%m%d%H%M%S)-{}-XXXX'\
                  .format(label)
-        script_file = self.sh("mktemp %s" % ftempl, stdout=StringIO()).strip()
+        script_file = self.sh("mktemp %s" % ftempl).strip()
         self.sh("cat - | tee {script} ; chmod a+rx {script}"\
             .format(script=script_file), stdin=script)
         if sudo:
@@ -299,7 +301,8 @@ class Remote(object):
         :param file_path: The path to the file
         :param context:   The SELinux context to be used
         """
-        if self.os.package_type != 'rpm':
+        if self.os.package_type != 'rpm' or \
+                self.os.name in ['opensuse', 'sle']:
             return
         if teuthology.lock.query.is_vm(self.shortname):
             return
@@ -416,10 +419,11 @@ class Remote(object):
         args.extend([
             'tar',
             'cz',
-            '-f', remote_temp_path,
+            '-f', '-',
             '-C', path,
             '--',
             '.',
+            run.Raw('>'), remote_temp_path
             ])
         self.run(args=args)
         if sudo:
@@ -448,23 +452,21 @@ class Remote(object):
     @property
     def os(self):
         if not hasattr(self, '_os'):
-            proc = self.run(args=['cat', '/etc/os-release'], stdout=StringIO(),
-                            stderr=StringIO(), check_status=False)
-            if proc.exitstatus == 0:
-                self._os = OS.from_os_release(proc.stdout.getvalue().strip())
+            try:
+                os_release = self.sh('cat /etc/os-release').strip()
+                self._os = OS.from_os_release(os_release)
                 return self._os
+            except CommandFailedError:
+                pass
 
-            proc = self.run(args=['lsb_release', '-a'], stdout=StringIO(),
-                            stderr=StringIO())
-            self._os = OS.from_lsb_release(proc.stdout.getvalue().strip())
+            lsb_release = self.sh('lsb_release -a').strip()
+            self._os = OS.from_lsb_release(lsb_release)
         return self._os
 
     @property
     def arch(self):
         if not hasattr(self, '_arch'):
-            proc = self.run(args=['uname', '-m'], stdout=StringIO())
-            proc.wait()
-            self._arch = proc.stdout.getvalue().strip()
+            self._arch = self.sh('uname -m').strip()
         return self._arch
 
     @property
@@ -520,13 +522,6 @@ class Remote(object):
         if self.ssh is not None:
             self.ssh.close()
 
-
-def getShortName(name):
-    """
-    Extract the name portion from remote name strings.
-    """
-    hostname = name.split('@')[-1]
-    return host_shortname(hostname)
 
 def getRemoteConsole(name, ipmiuser=None, ipmipass=None, ipmidomain=None,
                      logfile=None, timeout=20):

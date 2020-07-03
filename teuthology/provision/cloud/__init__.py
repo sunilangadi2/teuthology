@@ -2,7 +2,7 @@ import logging
 
 from teuthology.config import config
 
-import openstack
+from teuthology.provision.cloud import openstack
 
 log = logging.getLogger(__name__)
 
@@ -18,7 +18,7 @@ supported_drivers = dict(
 def get_types():
     types = list()
     if 'libcloud' in config and 'providers' in config.libcloud:
-        types = config.libcloud['providers'].keys()
+        types = list(config.libcloud['providers'].keys())
     return types
 
 

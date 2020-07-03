@@ -3,7 +3,6 @@ Internal tasks are tasks that are started from the teuthology infrastructure.
 Note that there is no corresponding task defined for this module.  All of
 the calls are made from other modules, most notably teuthology/run.py
 """
-from cStringIO import StringIO
 import contextlib
 import logging
 import os
@@ -19,6 +18,8 @@ from teuthology.config import config as teuth_config
 from teuthology.exceptions import VersionNotFoundError
 from teuthology.job_status import get_status, set_status
 from teuthology.orchestra import cluster, remote, run
+# the below import with noqa is to workaround run.py which does not support multilevel submodule import
+from teuthology.task.internal.redhat import setup_cdn_repo, setup_base_repo, setup_additional_repo, setup_stage_cdn  # noqa
 
 log = logging.getLogger(__name__)
 
@@ -69,7 +70,7 @@ def check_packages(ctx, config):
     If there are missing packages, fail the job.
     """
     for task in ctx.config['tasks']:
-        if task.keys()[0] == 'buildpackages':
+        if list(task.keys())[0] == 'buildpackages':
             log.info("Checking packages skipped because "
                      "the task buildpackages was found.")
             return
@@ -207,11 +208,12 @@ def buildpackages_prep(ctx, config):
     buildpackages_index = None
     buildpackages_prep_index = None
     for task in ctx.config['tasks']:
-        if task.keys()[0] == 'install':
+        t = list(task)[0]
+        if t == 'install':
             install_index = index
-        if task.keys()[0] == 'buildpackages':
+        if t == 'buildpackages':
             buildpackages_index = index
-        if task.keys()[0] == 'internal.buildpackages_prep':
+        if t == 'internal.buildpackages_prep':
             buildpackages_prep_index = index
         index += 1
     if (buildpackages_index is not None and
@@ -227,7 +229,7 @@ def buildpackages_prep(ctx, config):
             return BUILDPACKAGES_OK
     elif buildpackages_index is not None and install_index is None:
         ctx.config['tasks'].pop(buildpackages_index)
-        all_tasks = [x.keys()[0] for x in ctx.config['tasks']]
+        all_tasks = [list(x.keys())[0] for x in ctx.config['tasks']]
         log.info('buildpackages removed because no install task found in ' +
                  str(all_tasks))
         return BUILDPACKAGES_REMOVED
@@ -303,7 +305,7 @@ def fetch_binaries_for_coredumps(path, remote):
             dump_path = os.path.join(coredump_path, dump)
             dump_info = subprocess.Popen(['file', dump_path],
                                          stdout=subprocess.PIPE)
-            dump_out = dump_info.communicate()[0]
+            dump_out = dump_info.communicate()[0].decode()
 
             # Parse file output to get program, Example output:
             # 1422917770.7450.core: ELF 64-bit LSB core file x86-64, version 1 (SYSV), SVR4-style, \
@@ -311,12 +313,15 @@ def fetch_binaries_for_coredumps(path, remote):
             dump_program = dump_out.split("from '")[1].split(' ')[0]
 
             # Find path on remote server:
-            r = remote.run(args=['which', dump_program], stdout=StringIO())
-            remote_path = r.stdout.getvalue()
+            remote_path = remote.sh(['which', dump_program]).rstrip()
 
             # Pull remote program into coredump folder:
-            remote._sftp_get_file(remote_path, os.path.join(coredump_path,
-                                                            dump_program))
+            local_path = os.path.join(coredump_path,
+                                      dump_program.lstrip(os.path.sep))
+            local_dir = os.path.dirname(local_path)
+            if not os.path.exists(local_dir):
+                os.makedirs(local_dir)
+            remote._sftp_get_file(remote_path, local_path)
 
             # Pull Debug symbols:
             debug_path = os.path.join('/usr/lib/debug', remote_path)
@@ -417,6 +422,11 @@ def coredump(ctx, config):
                 '{adir}/coredump'.format(adir=archive_dir),
                 run.Raw('&&'),
                 'sudo', 'sysctl', '-w', 'kernel.core_pattern={adir}/coredump/%t.%p.core'.format(adir=archive_dir),
+		run.Raw('&&'),
+		'echo',
+		'kernel.core_pattern={adir}/coredump/%t.%p.core'.format(adir=archive_dir),
+		run.Raw('|'),
+		'sudo', 'tee', '-a', '/etc/sysctl.conf',
             ],
             wait=False,
         )
@@ -443,20 +453,15 @@ def coredump(ctx, config):
         # set status = 'fail' if the dir is still there = coredumps were
         # seen
         for rem in ctx.cluster.remotes.keys():
-            r = rem.run(
-                args=[
-                    'if', 'test', '!', '-e', '{adir}/coredump'.format(adir=archive_dir), run.Raw(';'), 'then',
-                    'echo', 'OK', run.Raw(';'),
-                    'fi',
-                ],
-                stdout=StringIO(),
-            )
-            if r.stdout.getvalue() != 'OK\n':
-                log.warning('Found coredumps on %s, flagging run as failed', rem)
-                set_status(ctx.summary, 'fail')
-                if 'failure_reason' not in ctx.summary:
-                    ctx.summary['failure_reason'] = \
-                        'Found coredumps on {rem}'.format(rem=rem)
+            try:
+                rem.sh("test -e " + archive_dir + "/coredump")
+            except run.CommandFailedError:
+                continue
+            log.warning('Found coredumps on %s, flagging run as failed', rem)
+            set_status(ctx.summary, 'fail')
+            if 'failure_reason' not in ctx.summary:
+                ctx.summary['failure_reason'] = \
+                    'Found coredumps on {rem}'.format(rem=rem)
 
 
 @contextlib.contextmanager

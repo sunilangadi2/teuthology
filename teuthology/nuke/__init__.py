@@ -185,7 +185,7 @@ def main(args):
         ifn = os.path.join(ctx.archive, 'info.yaml')
         if os.path.exists(ifn):
             with open(ifn, 'r') as fd:
-                info = yaml.load(fd.read())
+                info = yaml.safe_load(fd.read())
         if not ctx.pid:
             ctx.pid = info.get('pid')
             if not ctx.pid:
@@ -296,7 +296,7 @@ def nuke_one(ctx, target, should_unlock, synch_clocks, reboot_all,
         ret = target
     else:
         if should_unlock:
-            unlock_one(ctx, target.keys()[0], ctx.owner)
+            unlock_one(ctx, list(target.keys())[0], ctx.owner)
     return ret
 
 
@@ -318,6 +318,10 @@ def nuke_helper(ctx, should_unlock):
         remote = Remote(host)
         remote.console.power_off()
         return
+    elif status['machine_type'] in provision.pelagos.get_types():
+        provision.pelagos.park_node(host)
+        return
+
     if (not ctx.noipmi and 'ipmi_user' in config and
             'vpm' not in shortname):
         try:

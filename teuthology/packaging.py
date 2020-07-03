@@ -2,12 +2,15 @@ import logging
 import ast
 import re
 import requests
-import urllib
-import urlparse
+
+from teuthology.util.compat import urljoin, urlencode
 
 from collections import OrderedDict
-from cStringIO import StringIO
-
+from teuthology.util.compat import PY3
+if PY3:
+    from io import StringIO
+else:
+    from io import BytesIO as StringIO
 from teuthology import repo_utils
 
 from teuthology.config import config
@@ -657,7 +660,7 @@ class GitbuilderProject(object):
 
         :returns: A string URI. Ex: ref/master
         """
-        ref_name, ref_val = self._choose_reference().items()[0]
+        ref_name, ref_val = next(iter(self._choose_reference().items()))
         if ref_name == 'sha1':
             return 'sha1/%s' % ref_val
         else:
@@ -691,7 +694,7 @@ class GitbuilderProject(object):
             names = ('ref', 'tag', 'branch', 'sha1')
             vars = (ref, tag, branch, sha1)
             # filter(None,) filters for truth
-            if len(filter(None, vars)) > 1:
+            if sum(1 for _ in vars if _) > 1:
                 log.warning(
                     "More than one of ref, tag, branch, or sha1 supplied; "
                     "using %s",
@@ -880,15 +883,15 @@ class ShamanProject(GitbuilderProject):
         req_obj['project'] = self.project
         req_obj['flavor'] = flavor
         req_obj['distros'] = '%s/%s' % (self.distro, self.arch)
-        ref_name, ref_val = self._choose_reference().items()[0]
+        ref_name, ref_val = list(self._choose_reference().items())[0]
         if ref_name == 'tag':
             req_obj['sha1'] = self._sha1 = self._tag_to_sha1()
         elif ref_name == 'sha1':
             req_obj['sha1'] = ref_val
         else:
             req_obj['ref'] = ref_val
-        req_str = urllib.urlencode(req_obj)
-        uri = urlparse.urljoin(
+        req_str = urlencode(req_obj)
+        uri = urljoin(
             self.query_url,
             'search',
         ) + '?%s' % req_str
@@ -962,7 +965,7 @@ class ShamanProject(GitbuilderProject):
     @property
     def repo_url(self):
         self.assert_result()
-        return urlparse.urljoin(
+        return urljoin(
             self._result.json()[0]['chacra_url'],
             'repo',
         )
@@ -970,15 +973,25 @@ class ShamanProject(GitbuilderProject):
     def _get_repo(self):
         resp = requests.get(self.repo_url)
         resp.raise_for_status()
-        return resp.text
+        return str(resp.text)
 
     def _install_rpm_repo(self):
+        dist_release = self.dist_release
         repo = self._get_repo()
-        sudo_write_file(
-            self.remote,
-            '/etc/yum.repos.d/{proj}.repo'.format(proj=self.project),
-            repo,
-        )
+        if dist_release in ['opensuse', 'sle']:
+            log.info("Writing zypper repo:\n{}".format(repo))
+            sudo_write_file(
+                self.remote,
+                '/etc/zypp/repos.d/{proj}.repo'.format(proj=self.project),
+                repo,
+            )
+        else:
+            log.info("Writing yum repo:\n{}".format(repo))
+            sudo_write_file(
+                self.remote,
+                '/etc/yum.repos.d/{proj}.repo'.format(proj=self.project),
+                repo,
+            )
 
     def _install_deb_repo(self):
         repo = self._get_repo()

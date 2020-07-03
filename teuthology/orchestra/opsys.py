@@ -2,6 +2,7 @@ import re
 
 DISTRO_CODENAME_MAP = {
     "ubuntu": {
+        "20.04": "focal",
         "18.04": "bionic",
         "17.10": "artful",
         "17.04": "zesty",
@@ -25,6 +26,7 @@ DISTRO_CODENAME_MAP = {
         "6": "santiago",
     },
     "centos": {
+        "8": "core",
         "7": "core",
         "6": "core",
     },
@@ -42,22 +44,27 @@ DISTRO_CODENAME_MAP = {
     "opensuse": {
         "15.0": "leap",
         "15.1": "leap",
+        "15.2": "leap",
         "42.2": "leap",
         "42.3": "leap",
     },
     "sle": {
+        "12.1": "sle",
         "12.2": "sle",
         "12.3": "sle",
+        "15.0": "sle",
+        "15.1": "sle",
+        "15.2": "sle",
     },
 }
 
 DEFAULT_OS_VERSION = dict(
     ubuntu="18.04",
     fedora="25",
-    centos="7.6",
+    centos="8.1",
     opensuse="15.0",
     sle="15.0",
-    rhel="7.6",
+    rhel="8.1",
     debian='8.0'
 )
 

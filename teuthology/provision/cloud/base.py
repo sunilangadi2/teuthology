@@ -8,7 +8,6 @@ import teuthology.orchestra.remote
 import teuthology.provision.cloud
 from teuthology.misc import canonicalize_hostname, decanonicalize_hostname
 
-
 log = logging.getLogger(__name__)
 
 
@@ -41,7 +40,7 @@ class Provisioner(object):
             self, provider, name, os_type=None, os_version=None,
             conf=None, user='ubuntu',
     ):
-        if isinstance(provider, basestring):
+        if isinstance(provider, str):
             provider = teuthology.provision.cloud.get_provider(provider)
         self.provider = provider
         self.name = decanonicalize_hostname(name)

@@ -27,7 +27,7 @@ def substitute_placeholders(input_dict, values_dict):
     input_dict = copy.deepcopy(input_dict)
 
     def _substitute(input_dict, values_dict):
-        for key, value in input_dict.items():
+        for key, value in list(input_dict.items()):
             if isinstance(value, dict):
                 _substitute(value, values_dict)
             elif isinstance(value, Placeholder):
@@ -63,10 +63,13 @@ dict_templ = {
                     'debug mon': 20,
                     'debug ms': 1,
                     'debug paxos': 20},
+                'mgr': {
+                    'debug mgr': 20,
+                    'debug ms': 1},
                 'osd': {
                     'debug filestore': 20,
                     'debug journal': 20,
-                    'debug ms': 1,
+                    'debug ms': 20,
                     'debug osd': 25
                 }
             },
@@ -95,6 +98,7 @@ dict_templ = {
         }
     },
     'repo': Placeholder('ceph_repo'),
+    'sleep_before_teardown': 0,
     'suite': Placeholder('suite'),
     'suite_repo': Placeholder('suite_repo'),
     'suite_relpath': Placeholder('suite_relpath'),

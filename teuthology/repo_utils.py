@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import time
 
+from teuthology import misc
 from teuthology.util.flock import FileLock
 from teuthology.config import config
 from teuthology.contextutil import MaxWhileTries, safe_while
@@ -59,10 +60,12 @@ def ls_remote(url, ref):
 
     :returns: The sha1 if found; else None
     """
+    sha1 = None
     cmd = "git ls-remote {} {}".format(url, ref)
     result = subprocess.check_output(
         cmd, shell=True).split()
-    sha1 = result[0] if result else None
+    if result:
+        sha1 = result[0].decode()
     log.debug("{} -> {}".format(cmd, sha1))
     return sha1
 
@@ -112,6 +115,9 @@ def clone_repo(repo_url, dest_path, branch, shallow=True):
     """
     validate_branch(branch)
     log.info("Cloning %s %s from upstream", repo_url, branch)
+    if branch.startswith('refs/'):
+        clone_repo_ref(repo_url, dest_path, branch)
+        return
     args = ['git', 'clone']
     if shallow:
         args.extend(['--depth', '1'])
@@ -123,7 +129,7 @@ def clone_repo(repo_url, dest_path, branch, shallow=True):
         stderr=subprocess.STDOUT)
 
     not_found_str = "Remote branch %s not found" % branch
-    out = proc.stdout.read()
+    out = proc.stdout.read().decode()
     result = proc.wait()
     # Newer git versions will bail if the branch is not found, but older ones
     # will not. Fortunately they both output similar text.
@@ -136,6 +142,54 @@ def clone_repo(repo_url, dest_path, branch, shallow=True):
     elif result != 0:
         # Unknown error
         raise GitError("git clone failed!")
+
+
+def rsstrip(s, suffix):
+    return s[:-len(suffix)] if s.endswith(suffix) else s
+
+
+def lsstrip(s, prefix):
+    return s[len(prefix):] if s.startswith(prefix) else s
+
+
+def remote_ref_from_ref(ref, remote='origin'):
+    if ref.startswith('refs/pull/'):
+        return 'refs/remotes/' + remote + lsstrip(ref, 'refs')
+    elif ref.startswith('refs/heads/'):
+        return 'refs/remotes/' + remote + lsstrip(ref, 'refs/heads')
+    raise GitError("Unsupported ref '%s'" % ref)
+
+
+def local_branch_from_ref(ref):
+    if ref.startswith('refs/pull/'):
+        s = lsstrip(ref, 'refs/pull/')
+        s = rsstrip(s, '/merge')
+        s = rsstrip(s, '/head')
+        return "PR#%s" % s
+    elif ref.startswith('refs/heads/'):
+        return lsstrip(ref, 'refs/heads/')
+    raise GitError("Unsupported ref '%s', try 'refs/heads/' or 'refs/pull/'" % ref)
+
+
+def fetch_refspec(ref):
+    if '/' in ref:
+        remote_ref = remote_ref_from_ref(ref)
+        return "+%s:%s" % (ref, remote_ref)
+    else:
+        # looks like a branch name
+        return ref
+
+
+def clone_repo_ref(repo_url, dest_path, ref):
+    branch_name = local_branch_from_ref(ref)
+    remote_ref = remote_ref_from_ref(ref)
+    misc.sh('git init %s' % dest_path)
+    misc.sh('git remote add origin %s' % repo_url, cwd=dest_path)
+    #misc.sh('git fetch --depth 1 origin %s' % fetch_refspec(ref),
+    #                                                        cwd=dest_path)
+    fetch_branch(dest_path, ref)
+    misc.sh('git checkout -b %s %s' % (branch_name, remote_ref),
+                                                            cwd=dest_path)
 
 
 def set_remote(repo_path, repo_url):
@@ -172,7 +226,7 @@ def fetch(repo_path):
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT)
     if proc.wait() != 0:
-        out = proc.stdout.read()
+        out = proc.stdout.read().decode()
         log.error(out)
         raise GitError("git fetch failed!")
 
@@ -188,21 +242,21 @@ def fetch_branch(repo_path, branch, shallow=True):
                       GitError for other errors
     """
     validate_branch(branch)
-    log.info("Fetching %s from upstream", branch)
+    log.info("Fetching %s from origin", branch)
     args = ['git', 'fetch']
     if shallow:
         args.extend(['--depth', '1'])
-    args.extend(['-p', 'origin', branch])
+    args.extend(['-p', 'origin', fetch_refspec(branch)])
     proc = subprocess.Popen(
         args,
         cwd=repo_path,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT)
     if proc.wait() != 0:
-        not_found_str = "fatal: Couldn't find remote ref %s" % branch
-        out = proc.stdout.read()
+        not_found_str = "fatal: couldn't find remote ref %s" % branch
+        out = proc.stdout.read().decode()
         log.error(out)
-        if not_found_str in out:
+        if not_found_str in out.lower():
             raise BranchNotFoundError(branch)
         else:
             raise GitError("git fetch failed!")
@@ -218,12 +272,16 @@ def reset_repo(repo_url, dest_path, branch):
                       GitError for other errors
     """
     validate_branch(branch)
-    log.info('Resetting repo at %s to branch %s', dest_path, branch)
+    if '/' in branch:
+        reset_branch = lsstrip(remote_ref_from_ref(branch), 'refs/remotes/')
+    else:
+        reset_branch = 'origin/%s' % branch
+    log.info('Resetting repo at %s to branch %s', dest_path, reset_branch)
     # This try/except block will notice if the requested branch doesn't
     # exist, whether it was cloned or fetched.
     try:
         subprocess.check_output(
-            ('git', 'reset', '--hard', 'origin/%s' % branch),
+            ('git', 'reset', '--hard', reset_branch),
             cwd=dest_path,
         )
     except subprocess.CalledProcessError:
@@ -255,7 +313,8 @@ def fetch_repo(url, branch, bootstrap=None, lock=True):
     src_base_path = config.src_base_path
     if not os.path.exists(src_base_path):
         os.mkdir(src_base_path)
-    dirname = '%s_%s' % (url_to_dirname(url), branch)
+    branch_dir = ref_to_dirname(branch)
+    dirname = '%s_%s' % (url_to_dirname(url), branch_dir)
     dest_path = os.path.join(src_base_path, dirname)
     # only let one worker create/update the checkout at a time
     lock_path = dest_path.rstrip('/') + '.lock'
@@ -278,18 +337,26 @@ def fetch_repo(url, branch, bootstrap=None, lock=True):
     return dest_path
 
 
+def ref_to_dirname(branch):
+    if '/' in branch:
+        return local_branch_from_ref(branch)
+    else:
+        return branch
+
+
 def url_to_dirname(url):
     """
     Given a URL, returns a string that's safe to use as a directory name.
     Examples:
 
+        git@git.ceph.com/ceph-qa-suite.git -> git.ceph.com_ceph-qa-suite
         git://git.ceph.com/ceph-qa-suite.git -> git.ceph.com_ceph-qa-suite
         https://github.com/ceph/ceph -> github.com_ceph_ceph
         https://github.com/liewegas/ceph.git -> github.com_liewegas_ceph
         file:///my/dir/has/ceph.git -> my_dir_has_ceph
     """
     # Strip protocol from left-hand side
-    string = re.match('.*://(.*)', url).groups()[0]
+    string = re.match('(?:.*://|.*@)(.*)', url).groups()[0]
     # Strip '.git' from the right-hand side
     string = string.rstrip('.git')
     # Replace certain characters with underscores

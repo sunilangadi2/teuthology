@@ -25,6 +25,8 @@ Miscellaneous arguments:
   --dry-run                   Do a dry run; do not schedule anything. In
                               combination with -vv, also call
                               teuthology-schedule with --dry-run.
+  -y, --non-interactive       Do not ask question and say yes when
+                              it is possible.
 
 Standard arguments:
   <config_yaml>               Optional extra job yaml to include
@@ -52,7 +54,13 @@ Standard arguments:
                               [default: basic]
   -t <branch>, --teuthology-branch <branch>
                               The teuthology branch to run against.
-                              [default: {default_teuthology_branch}]
+                              Default value is determined in the next order.
+                              There is TEUTH_BRANCH environment variable set.
+                              There is `qa/.teuthology_branch` present in
+                              the suite repo and contains non-empty string.
+                              There is `teuthology_branch` present in one of
+                              the user or system `teuthology.yaml` configuration
+                              files respectively, otherwise use `master`.
   -m <type>, --machine-type <type>
                               Machine type [default: {default_machine_type}]
   -d <distro>, --distro <distro>
@@ -73,10 +81,21 @@ Standard arguments:
                               assembling jobs from yaml fragments. This causes
                               <suite_branch> to be ignored for scheduling
                               purposes, but it will still be used for test
-                              running.
+                              running. The <suite_dir> must have `qa/suite`
+                              sub-directory.
   --validate-sha1 <bool>
                               Validate that git SHA1s passed to -S exist.
                               [default: true]
+  --sleep-before-teardown <seconds>
+                              Number of seconds to sleep before teardown.
+                              Use with care, as this applies to all jobs in the
+                              run. This option is used along with --limit one.
+                              If the --limit ommitted then it's forced to 1.
+                              If the --limit is greater than 4, then user must
+                              confirm it interactively to avoid massive lock
+                              of resources, however --non-interactive option
+                              can be used to skip user input.
+                              [default: 0]
 
 Scheduler arguments:
   --owner <owner>             Job owner
@@ -106,6 +125,14 @@ Scheduler arguments:
   --filter-out KEYWORDS       Do not run jobs whose description contains any of
                               the keywords in the comma separated keyword
                               string specified.
+  --filter-all KEYWORDS       Only run jobs whose description contains each one
+                              of the keywords in the comma separated keyword
+                              string specified.
+  -F, --filter-fragments <bool>
+                              Check yaml fragments too if job description
+                              does not match the filters provided with
+                              options --filter, --filter-out, and --filter-all.
+                              [default: false]
   --archive-upload RSYNC_DEST Rsync destination to upload archives.
   --archive-upload-url URL    Public facing URL where archives are uploaded.
   --throttle SLEEP            When scheduling, wait SLEEP seconds between jobs.
@@ -144,7 +171,6 @@ Scheduler arguments:
     default_suite_repo=defaults('--suite-repo',
                             config.get_ceph_qa_suite_git_url()),
     default_ceph_branch=defaults('--ceph-branch', 'master'),
-    default_teuthology_branch=defaults('--teuthology-branch', 'master'),
 )
 
 

@@ -1,7 +1,6 @@
 """
 Start mpi processes (and allow commands to be run inside process)
 """
-from StringIO import StringIO
 import logging
 import re
 
@@ -17,7 +16,7 @@ def _check_mpi_version(remotes):
     """
     versions = set()
     for remote in remotes:
-        version_str = remote.run(args=["mpiexec", "--version"], stdout=StringIO()).stdout.getvalue()
+        version_str = remote.sh("mpiexec --version")
         try:
             version = re.search("^\s+Version:\s+(.+)$", version_str, re.MULTILINE).group(1)
         except AttributeError:
@@ -92,7 +91,7 @@ def task(ctx, config):
     remotes = []
     master_remote = None
     if 'nodes' in config:
-        if isinstance(config['nodes'], basestring) and config['nodes'] == 'all':
+        if isinstance(config['nodes'], str) and config['nodes'] == 'all':
             for role in  teuthology.all_roles(ctx.cluster):
                 (remote,) = ctx.cluster.only(role).remotes.keys()
                 ip,port = remote.ssh.get_transport().getpeername()

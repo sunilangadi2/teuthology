@@ -20,6 +20,7 @@ from teuthology.repo_utils import fetch_qa_suite, fetch_teuthology
 from teuthology.orchestra.opsys import OS
 from teuthology.packaging import get_builder_project
 from teuthology.repo_utils import build_git_url
+from teuthology.suite.build_matrix import combine_path
 from teuthology.task.install import get_flavor
 
 log = logging.getLogger(__name__)
@@ -146,6 +147,9 @@ def get_distro_defaults(distro, machine_type):
     elif distro == 'fedora':
         os_type = distro
         os_version = '20'
+    elif distro == 'opensuse':
+        os_type = distro
+        os_version = '15.1'
     else:
         raise ValueError("Invalid distro value passed: %s", distro)
     _os = OS(name=os_type, version=os_version)
@@ -248,7 +252,7 @@ def get_branch_info(project, branch, project_owner='ceph'):
 
 
 def package_version_for_hash(hash, kernel_flavor='basic', distro='rhel',
-                             distro_version='7.0', machine_type='smithi'):
+                             distro_version='8.0', machine_type='smithi'):
     """
     Does what it says on the tin. Uses gitbuilder repos.
 
@@ -310,8 +314,8 @@ def get_install_task_flavor(job_config):
     project_overrides = install_overrides.get(project, dict())
     first_install_config = dict()
     for task in tasks:
-        if task.keys()[0] == 'install':
-            first_install_config = task.values()[0] or dict()
+        if list(task.keys())[0] == 'install':
+            first_install_config = list(task.values())[0] or dict()
             break
     first_install_config = copy.deepcopy(first_install_config)
     deep_merge(first_install_config, install_overrides)
@@ -456,7 +460,8 @@ def find_git_parent(project, sha1):
         url = '%s/%s.git/refresh' % (base_url, project)
         resp = requests.get(url)
         if not resp.ok:
-            log.error('git refresh failed for %s: %s', project, resp.content)
+            log.error('git refresh failed for %s: %s',
+                      project, resp.content.decode())
 
     def get_sha1s(project, committish, count):
         url = '/'.join((base_url, '%s.git' % project,
@@ -465,6 +470,7 @@ def find_git_parent(project, sha1):
         resp.raise_for_status()
         sha1s = resp.json()['sha1s']
         if len(sha1s) != count:
+            log.debug('got response: %s', resp.json())
             log.error('can''t find %d parents of %s in %s: %s',
                        int(count), sha1, project, resp.json()['error'])
         return sha1s
@@ -477,3 +483,42 @@ def find_git_parent(project, sha1):
         return sha1s[1]
     else:
         return None
+
+
+def filter_configs(configs, suite_name=None,
+                            filter_in=None,
+                            filter_out=None,
+                            filter_all=None,
+                            filter_fragments=True):
+    """
+    Returns a generator for pairs of description and fragment paths.
+
+    Usage:
+
+        configs = build_matrix(path, subset, seed)
+        for description, fragments in filter_configs(configs):
+            pass
+    """
+    for item in configs:
+        fragment_paths = item[1]
+        description = combine_path(suite_name, item[0]) \
+                                        if suite_name else item[0]
+        base_frag_paths = [strip_fragment_path(x)
+                                        for x in fragment_paths]
+        def matches(f):
+            if f in description:
+                return True
+            if filter_fragments and \
+                    any(f in path for path in base_frag_paths):
+                return True
+            return False
+        if filter_all:
+            if not all(matches(f) for f in filter_all):
+                continue
+        if filter_in:
+            if not any(matches(f) for f in filter_in):
+                continue
+        if filter_out:
+            if any(matches(f) for f in filter_out):
+                continue
+        yield([description, fragment_paths])

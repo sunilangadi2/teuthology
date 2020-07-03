@@ -1,7 +1,7 @@
 import pytest
 import docopt
 
-from mock import patch, call, Mock
+from unittest.mock import patch, call, Mock
 
 from teuthology import run
 from scripts import run as scripts_run
@@ -32,7 +32,7 @@ class TestRun(object):
 
     @patch("teuthology.run.merge_configs")
     def test_setup_config_targets_ok(self, m_merge_configs):
-        config = {"targets": range(4), "roles": range(2)}
+        config = {"targets": list(range(4)), "roles": list(range(2))}
         m_merge_configs.return_value = config
         result = run.setup_config(["some/config.yaml"])
         assert result["targets"] == [0, 1, 2, 3]
@@ -45,7 +45,7 @@ class TestRun(object):
         with pytest.raises(AssertionError):
             run.setup_config(["some/config.yaml"])
 
-    @patch("__builtin__.open")
+    @patch("teuthology.run.open")
     def test_write_initial_metadata(self, m_open):
         config = {"job_id": "123", "foo": "bar"}
         run.write_initial_metadata(
@@ -121,13 +121,16 @@ class TestRun(object):
     @patch("yaml.safe_dump")
     @patch("teuthology.report.try_push_job_info")
     @patch("teuthology.run.email_results")
-    @patch("__builtin__.open")
+    @patch("teuthology.run.open")
     @patch("sys.exit")
     def test_report_outcome(self, m_sys_exit, m_open, m_email_results, m_try_push_job_info, m_safe_dump, m_nuke, m_get_status):
-        config = {"nuke-on-error": True, "email-on-error": True}
         m_get_status.return_value = "fail"
         fake_ctx = Mock()
         summary = {"failure_reason": "reasons"}
+        summary_dump = "failure_reason: reasons\n"
+        config = {"nuke-on-error": True, "email-on-error": True}
+        config_dump = "nuke-on-error: true\nemail-on-error: true\n"
+        m_safe_dump.side_effect = [None, summary_dump, config_dump]
         run.report_outcome(config, "the/archive/path", summary, fake_ctx)
         assert m_nuke.called
         m_try_push_job_info.assert_called_with(config, summary)

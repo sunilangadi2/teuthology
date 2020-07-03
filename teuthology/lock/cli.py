@@ -13,7 +13,6 @@ from teuthology import misc
 from teuthology.config import set_config_attr
 
 from teuthology.lock import (
-    keys,
     ops,
     util,
     query,
@@ -88,7 +87,7 @@ def main(ctx):
                 vmachines.append(machine['name'])
         if vmachines:
             log.info("updating host keys for %s", ' '.join(sorted(vmachines)))
-            keys.do_update_keys(vmachines, _raise=False)
+            ops.do_update_keys(vmachines, _raise=False)
             # get statuses again to refresh any updated keys
             statuses = query.get_statuses(machines)
         if statuses:
@@ -149,14 +148,16 @@ def main(ctx):
                 ctx.machine_type, ctx.os_type, ctx.os_version):
             log.error('Invalid os-type or version detected -- lock failed')
             return 1
-        reimage_types = teuthology.provision.fog.get_types()
+        reimage_types = teuthology.provision.get_reimage_types()
         reimage_machines = list()
         updatekeys_machines = list()
+        machine_types = dict()
         for machine in machines:
             resp = ops.lock_one(machine, user, ctx.desc)
             if resp.ok:
                 machine_status = resp.json()
                 machine_type = machine_status['machine_type']
+                machine_types[machine] = machine_type
             if not resp.ok:
                 ret = 1
                 if not ctx.f:
@@ -177,9 +178,9 @@ def main(ctx):
         with teuthology.parallel.parallel() as p:
             ops.update_nodes(reimage_machines, True)
             for machine in reimage_machines:
-                p.spawn(teuthology.provision.reimage, ctx, machine)
+                p.spawn(teuthology.provision.reimage, ctx, machine, machine_types[machine])
         for machine in updatekeys_machines:
-            keys.do_update_keys([machine])
+            ops.do_update_keys([machine])
         ops.update_nodes(reimage_machines + machines_to_update)
 
     elif ctx.unlock:
@@ -252,8 +253,9 @@ def do_summary(ctx):
         lockd[who][1] += 1 if l['up'] else 0
         lockd[who][2] = l['machine_type']
 
+    # sort locks by machine type and count
     locks = sorted([p for p in lockd.items()
-                    ], key=lambda sort: (sort[1][2], sort[1][0]))
+                    ], key=lambda sort: (sort[1][2] or '', sort[1][0]))
     total_count, total_up = 0, 0
     print("TYPE     COUNT  UP  OWNER")
 
@@ -261,7 +263,7 @@ def do_summary(ctx):
             # if machinetype == spectype:
             print("{machinetype:8s} {count:3d}  {up:3d}  {owner}".format(
                 count=count, up=upcount, owner=owner[0],
-                machinetype=machinetype))
+                machinetype=machinetype or '(none)'))
             total_count += count
             total_up += upcount
 
@@ -286,4 +288,4 @@ def updatekeys(args):
             for doc in docs:
                 machines = [n for n in doc.get('targets', dict()).keys()]
 
-    return keys.do_update_keys(machines, all_)[0]
+    return ops.do_update_keys(machines, all_)[0]

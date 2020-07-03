@@ -1,14 +1,17 @@
+import jinja2
 import logging
 import os
 import sys
+import time
 import types
 
 from copy import deepcopy
+from humanfriendly import format_timespan
 
 from teuthology.config import config as teuth_config
 from teuthology.exceptions import ConnectionLostError
-from teuthology.job_status import set_status
-from teuthology.misc import get_http_log_path
+from teuthology.job_status import set_status, get_status
+from teuthology.misc import get_http_log_path, get_results_url
 from teuthology.sentry import get_client as get_sentry_client
 from teuthology.timer import Timer
 
@@ -16,6 +19,7 @@ log = logging.getLogger(__name__)
 
 
 def get_task(name):
+    # todo: support of submodules
     if '.' in name:
         module_name, task_name = name.split('.')
     else:
@@ -151,6 +155,14 @@ def run_tasks(tasks, ctx):
     finally:
         try:
             exc_info = sys.exc_info()
+            sleep_before_teardown = ctx.config.get('sleep_before_teardown')
+            if sleep_before_teardown:
+                log.info(
+                    'Sleeping for {} seconds before unwinding because'
+                    ' --sleep-before-teardown was given...'
+                    .format(sleep_before_teardown))
+                notify_sleep_before_teardown(ctx, stack, sleep_before_teardown)
+                time.sleep(sleep_before_teardown)
             while stack:
                 taskname, manager = stack.pop()
                 log.debug('Unwinding manager %s', taskname)
@@ -179,7 +191,6 @@ def run_tasks(tasks, ctx):
                         interactive.task(ctx=ctx, config=None)
                 else:
                     if suppress:
-                        sys.exc_clear()
                         exc_info = (None, None, None)
 
             if exc_info != (None, None, None):
@@ -190,3 +201,58 @@ def run_tasks(tasks, ctx):
             # be careful about cyclic references
             del exc_info
         timer.mark("tasks complete")
+
+def build_email_body(ctx, stack, sleep_time_sec):
+    email_template_path = os.path.dirname(__file__) + \
+            '/templates/email-sleep-before-teardown.jinja2'
+
+    with open(email_template_path) as f:
+        template_text = f.read()
+
+    email_template = jinja2.Template(template_text)
+    archive_path = ctx.config.get('archive_path')
+    job_id = ctx.config.get('job_id')
+    status = get_status(ctx.summary)
+    stack_path = '/'.join(task for task, _ in stack)
+    suite_name=ctx.config.get('suite')
+    sleep_date=time.time()
+    sleep_date_str=time.strftime('%Y-%m-%d %H:%M:%S',
+                                 time.gmtime(sleep_date))
+
+    body = email_template.render(
+        sleep_time=format_timespan(sleep_time_sec),
+        sleep_time_sec=sleep_time_sec,
+        sleep_date=sleep_date_str,
+        owner=ctx.owner,
+        run_name=ctx.name,
+        job_id=ctx.config.get('job_id'),
+        job_info=get_results_url(ctx.name),
+        job_logs=get_http_log_path(archive_path, job_id),
+        suite_name=suite_name,
+        status=status,
+        task_stack=stack_path,
+    )
+    subject = (
+        'teuthology job {run}/{job} has fallen asleep at {date}'
+        .format(run=ctx.name, job=job_id, date=sleep_date_str)
+    )
+    return (subject.strip(), body.strip())
+
+def notify_sleep_before_teardown(ctx, stack, sleep_time):
+    email = ctx.config.get('email', None)
+    if not email:
+        # we have no email configured, return silently
+        return
+    (subject, body) = build_email_body(ctx, stack, sleep_time)
+    log.info('Sending no to {to}: {body}'.format(to=email, body=body))
+    import smtplib
+    from email.mime.text import MIMEText
+    msg = MIMEText(body)
+    msg['Subject'] = subject
+    msg['From'] = teuth_config.results_sending_email or 'teuthology'
+    msg['To'] = email
+    log.debug('sending email %s', msg.as_string())
+    smtp = smtplib.SMTP('localhost')
+    smtp.sendmail(msg['From'], [msg['To']], msg.as_string())
+    smtp.quit()
+

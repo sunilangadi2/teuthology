@@ -11,8 +11,7 @@ import teuthology.lock.util
 from teuthology.config import config
 from teuthology.contextutil import safe_while
 from teuthology.exceptions import ConsoleError
-
-import remote
+from teuthology.misc import host_shortname
 
 try:
     import libvirt
@@ -22,14 +21,23 @@ except ImportError:
 log = logging.getLogger(__name__)
 
 
-class PhysicalConsole():
+class RemoteConsole():
+    def getShortName(self, name=None):
+        """
+        Extract the name portion from remote name strings.
+        """
+        hostname = (name or self.name).split('@')[-1]
+        return host_shortname(hostname)
+
+
+class PhysicalConsole(RemoteConsole):
     """
     Physical Console (set from getRemoteConsole)
     """
     def __init__(self, name, ipmiuser=None, ipmipass=None, ipmidomain=None,
-                 logfile=None, timeout=20):
+                 logfile=None, timeout=40):
         self.name = name
-        self.shortname = remote.getShortName(name)
+        self.shortname = self.getShortName(name)
         self.timeout = timeout
         self.logfile = None
         self.ipmiuser = ipmiuser or config.ipmi_user
@@ -266,8 +274,7 @@ class PhysicalConsole():
         child = self._pexpect_spawn_ipmi('power on')
         child.expect('Chassis Power Control: Up/On', timeout=self.timeout)
         self._wait_for_login()
-        log.info('Power off for {i} seconds completed'.format(
-            s=self.shortname, i=interval))
+        log.info('Power off for {i} seconds completed'.format(i=interval))
 
     def spawn_sol_log(self, dest_path):
         """
@@ -278,7 +285,7 @@ class PhysicalConsole():
         """
         pexpect_templ = \
             "import pexpect; " \
-            "pexpect.run('{cmd}', logfile=file('{log}', 'w'), timeout=None)"
+            "pexpect.run('{cmd}', logfile=open('{log}', 'wb'), timeout=None)"
 
         def start():
             console_cmd = self._console_command()
@@ -306,7 +313,7 @@ class PhysicalConsole():
         return proc
 
 
-class VirtualConsole():
+class VirtualConsole(RemoteConsole):
     """
     Virtual Console (set from getRemoteConsole)
     """
@@ -314,7 +321,7 @@ class VirtualConsole():
         if libvirt is None:
             raise RuntimeError("libvirt not found")
 
-        self.shortname = remote.getShortName(name)
+        self.shortname = self.getShortName(name)
         status_info = teuthology.lock.query.get_status(self.shortname)
         try:
             if teuthology.lock.query.is_vm(status=status_info):
@@ -377,5 +384,4 @@ class VirtualConsole():
         self.vm_domain.info().destroy()
         time.sleep(interval)
         self.vm_domain.info().create()
-        log.info('Power off for {i} seconds completed'.format(
-            s=self.shortname, i=interval))
+        log.info('Power off for {i} seconds completed'.format(i=interval))
